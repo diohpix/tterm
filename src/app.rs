@@ -116,7 +116,7 @@ impl App {
             },
         )
         .unwrap();
-        
+
         self.terminals.insert(terminal_id, terminal_backend);
         terminal_id
     }
@@ -276,14 +276,19 @@ impl App {
                         .set_focus(is_focused)
                         .set_size(Vec2::new(available_rect.width(), available_rect.height()));
                     
-                    let response = ui.allocate_rect(available_rect, egui::Sense::click());
-                    if response.clicked() {
-                        self.focused_terminal = Some(*terminal_id);
-                    }
-                    
+                    // Render terminal and check for clicks
                     ui.scope_builder(egui::UiBuilder::new().max_rect(available_rect), |ui| {
-                        ui.add(terminal);
+                        ui.add(terminal)
                     });
+                    
+                    // Check if the terminal area was clicked
+                    if ui.input(|i| i.pointer.any_click()) {
+                        if let Some(pos) = ui.input(|i| i.pointer.interact_pos()) {
+                            if available_rect.contains(pos) {
+                                self.focused_terminal = Some(*terminal_id);
+                            }
+                        }
+                    }
                 }
             }
             PanelContent::Split { direction, first, second, ratio, .. } => {
@@ -342,15 +347,15 @@ impl App {
     fn toggle_grid_view(&mut self) {
         self.view_mode = match self.view_mode {
             ViewMode::Single => {
-                // Don't switch to grid view if only one terminal exists
-                if self.terminals.len() <= 1 {
+                // Don't switch to grid view if only one tab exists
+                if self.tabs.len() <= 1 {
                     return; // Stay in single view
                 }
                 
-                // Calculate optimal grid size based on number of terminals
-                let terminal_count = self.terminals.len();
-                let cols = (terminal_count as f32).sqrt().ceil() as usize;
-                let rows = (terminal_count as f32 / cols as f32).ceil() as usize;
+                // Calculate optimal grid size based on number of tabs
+                let tab_count = self.tabs.len();
+                let cols = (tab_count as f32).sqrt().ceil() as usize;
+                let rows = (tab_count as f32 / cols as f32).ceil() as usize;
                 ViewMode::Grid { rows: rows.max(1), cols: cols.max(1) }
             }
             ViewMode::Grid { .. } => ViewMode::Single,
@@ -362,14 +367,11 @@ impl App {
             let cell_width = available_rect.width() / cols as f32;
             let cell_height = available_rect.height() / rows as f32;
             
-            // Get all terminal IDs for grid view
-            let terminal_ids: Vec<u64> = self.terminals.keys().cloned().collect();
+            // Get all tabs for grid view (maintain split layouts per tab)
+            let mut tab_ids: Vec<_> = self.tab_order.clone();
+            tab_ids.truncate(rows * cols); // Don't render more than grid capacity
             
-            for (idx, &terminal_id) in terminal_ids.iter().enumerate() {
-                if idx >= rows * cols {
-                    break; // Don't render more than grid capacity
-                }
-                
+            for (idx, &tab_id) in tab_ids.iter().enumerate() {
                 let row = idx / cols;
                 let col = idx % cols;
                 
@@ -381,70 +383,64 @@ impl App {
                     egui::vec2(cell_width - 2.0, cell_height - 2.0), // Small gap between cells
                 );
                 
-                if let Some(terminal_backend) = self.terminals.get_mut(&terminal_id) {
-                    let is_focused = self.focused_terminal == Some(terminal_id);
-                    
-                    // Draw border
-                    let border_color = if is_focused {
-                        egui::Color32::from_rgb(0, 150, 255) // Blue for focused
-                    } else if self.broadcast_mode && self.selected_terminals.contains(&terminal_id) {
-                        egui::Color32::from_rgb(255, 100, 100) // Red for broadcast selected
-                    } else {
-                        egui::Color32::GRAY // Gray for normal
-                    };
-                    
-                    ui.painter().rect_stroke(
-                        cell_rect,
-                        2.0,
-                        egui::Stroke::new(2.0, border_color),
-                        egui::epaint::StrokeKind::Outside,
-                    );
-                    
-                    // Check for mouse click in this cell area
-                    if ui.input(|i| i.pointer.any_click()) {
-                        if let Some(pos) = ui.input(|i| i.pointer.interact_pos()) {
-                            if cell_rect.contains(pos) {
-                                self.focused_terminal = Some(terminal_id);
+                // Get tab layout and render it
+                if let Some(tab) = self.tabs.get(&tab_id) {
+                    if let Some(layout) = self.tab_layouts.get(&tab_id).cloned() {
+                        // Draw tab border
+                        let is_active_tab = tab_id == self.active_tab_id;
+                        let border_color = if is_active_tab {
+                            egui::Color32::from_rgb(0, 150, 255) // Blue for active tab
+                        } else {
+                            egui::Color32::GRAY // Gray for normal
+                        };
+                        
+                        ui.painter().rect_stroke(
+                            cell_rect,
+                            2.0,
+                            egui::Stroke::new(2.0, border_color),
+                            egui::epaint::StrokeKind::Outside,
+                        );
+                        
+                        // Check for mouse click to activate tab
+                        if ui.input(|i| i.pointer.any_click()) {
+                            if let Some(pos) = ui.input(|i| i.pointer.interact_pos()) {
+                                if cell_rect.contains(pos) {
+                                    self.active_tab_id = tab_id;
+                                    self.focused_terminal = self.get_first_terminal_id(&layout);
+                                }
                             }
                         }
+                        
+                        // Calculate header height and content area
+                        let header_height = 25.0;
+                        let header_rect = Rect::from_min_size(
+                            cell_rect.min,
+                            egui::vec2(cell_rect.width(), header_height),
+                        );
+                        let content_rect = Rect::from_min_size(
+                            egui::pos2(cell_rect.min.x, cell_rect.min.y + header_height),
+                            egui::vec2(cell_rect.width(), cell_rect.height() - header_height),
+                        );
+                        
+                        // Draw header background
+                        ui.painter().rect_filled(
+                            header_rect,
+                            2.0,
+                            egui::Color32::from_rgb(50, 50, 50), // Dark gray background
+                        );
+                        
+                        // Draw header text
+                        ui.painter().text(
+                            header_rect.center(),
+                            egui::Align2::CENTER_CENTER,
+                            &tab.title,
+                            egui::FontId::proportional(12.0),
+                            egui::Color32::WHITE,
+                        );
+                        
+                        // Render the tab's layout (including splits) in the content area
+                        self.render_panel_content(ui, &layout, content_rect);
                     }
-                    
-                    // Calculate header height and terminal area
-                    let header_height = 25.0;
-                    let header_rect = Rect::from_min_size(
-                        cell_rect.min,
-                        egui::vec2(cell_rect.width(), header_height),
-                    );
-                    let terminal_rect = Rect::from_min_size(
-                        egui::pos2(cell_rect.min.x, cell_rect.min.y + header_height),
-                        egui::vec2(cell_rect.width(), cell_rect.height() - header_height),
-                    );
-                    
-                    // Draw header background
-                    ui.painter().rect_filled(
-                        header_rect,
-                        2.0,
-                        egui::Color32::from_rgb(50, 50, 50), // Dark gray background
-                    );
-                    
-                    // Draw header text
-                    let terminal_title = format!("Terminal {}", terminal_id);
-                    ui.painter().text(
-                        header_rect.center(),
-                        egui::Align2::CENTER_CENTER,
-                        &terminal_title,
-                        egui::FontId::proportional(12.0),
-                        egui::Color32::WHITE,
-                    );
-                    
-                    // Render terminal in the remaining space
-                    let terminal = TerminalView::new(ui, terminal_backend)
-                        .set_focus(is_focused)
-                        .set_size(Vec2::new(terminal_rect.width(), terminal_rect.height()));
-                    
-                    ui.scope_builder(egui::UiBuilder::new().max_rect(terminal_rect), |ui| {
-                        ui.add(terminal);
-                    });
                 }
             }
         }
@@ -476,6 +472,30 @@ impl App {
                     // Send input to terminal
                     terminal.process_command(egui_term::BackendCommand::Write(input.as_bytes().to_vec()));
                 }
+            }
+        }
+    }
+    
+    fn navigate_focus_in_splits(&mut self) {
+        if let Some(layout) = self.tab_layouts.get(&self.active_tab_id) {
+            let terminal_ids = self.collect_terminal_ids(layout);
+            
+            if terminal_ids.len() <= 1 {
+                return; // No navigation needed with only one terminal
+            }
+            
+            if let Some(current_focused) = self.focused_terminal {
+                if let Some(current_idx) = terminal_ids.iter().position(|&id| id == current_focused) {
+                    // Move to next terminal (cycling back to first if at end)
+                    let next_idx = (current_idx + 1) % terminal_ids.len();
+                    self.focused_terminal = Some(terminal_ids[next_idx]);
+                } else {
+                    // If current focus is not in this tab, focus on first terminal
+                    self.focused_terminal = terminal_ids.first().copied();
+                }
+            } else {
+                // No current focus, focus on first terminal
+                self.focused_terminal = terminal_ids.first().copied();
             }
         }
     }
@@ -515,8 +535,8 @@ impl eframe::App for App {
             match event {
                 PtyEvent::Exit => {
                     if self.tabs.len() == 1 {
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                        return;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            return;
                     } else {
                         self.close_tab(tab_id);
                     }
@@ -577,6 +597,14 @@ impl eframe::App for App {
                             }
                         }
                     }
+                }
+            }
+            
+            // Panel navigation with Alt+Arrow keys
+            if i.modifiers.alt {
+                if i.key_pressed(egui::Key::ArrowLeft) || i.key_pressed(egui::Key::ArrowRight) ||
+                   i.key_pressed(egui::Key::ArrowUp) || i.key_pressed(egui::Key::ArrowDown) {
+                    self.navigate_focus_in_splits();
                 }
             }
         });
