@@ -409,12 +409,40 @@ impl App {
                         }
                     }
                     
-                    // Render terminal
+                    // Calculate header height and terminal area
+                    let header_height = 25.0;
+                    let header_rect = Rect::from_min_size(
+                        cell_rect.min,
+                        egui::vec2(cell_rect.width(), header_height),
+                    );
+                    let terminal_rect = Rect::from_min_size(
+                        egui::pos2(cell_rect.min.x, cell_rect.min.y + header_height),
+                        egui::vec2(cell_rect.width(), cell_rect.height() - header_height),
+                    );
+                    
+                    // Draw header background
+                    ui.painter().rect_filled(
+                        header_rect,
+                        2.0,
+                        egui::Color32::from_rgb(50, 50, 50), // Dark gray background
+                    );
+                    
+                    // Draw header text
+                    let terminal_title = format!("Terminal {}", terminal_id);
+                    ui.painter().text(
+                        header_rect.center(),
+                        egui::Align2::CENTER_CENTER,
+                        &terminal_title,
+                        egui::FontId::proportional(12.0),
+                        egui::Color32::WHITE,
+                    );
+                    
+                    // Render terminal in the remaining space
                     let terminal = TerminalView::new(ui, terminal_backend)
                         .set_focus(is_focused)
-                        .set_size(Vec2::new(cell_rect.width(), cell_rect.height()));
+                        .set_size(Vec2::new(terminal_rect.width(), terminal_rect.height()));
                     
-                    ui.scope_builder(egui::UiBuilder::new().max_rect(cell_rect), |ui| {
+                    ui.scope_builder(egui::UiBuilder::new().max_rect(terminal_rect), |ui| {
                         ui.add(terminal);
                     });
                 }
@@ -553,10 +581,12 @@ impl eframe::App for App {
             }
         });
 
-        // Top panel for tabs
-        egui::TopBottomPanel::top("tab_panel").show(ctx, |ui| {
-            self.render_tab_bar(ui);
-        });
+        // Top panel for tabs (only show in single mode)
+        if matches!(self.view_mode, ViewMode::Single) {
+            egui::TopBottomPanel::top("tab_panel").show(ctx, |ui| {
+                self.render_tab_bar(ui);
+            });
+        }
         
         // Bottom panel for status
         egui::TopBottomPanel::bottom("status_panel").show(ctx, |ui| {
