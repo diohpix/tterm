@@ -547,7 +547,7 @@ impl eframe::App for App {
         
         // Handle keyboard shortcuts
         ctx.input(|i| {
-            if i.modifiers.ctrl {
+            if i.modifiers.mac_cmd {
                 if i.key_pressed(egui::Key::T) {
                     self.create_new_tab();
                 }
@@ -569,11 +569,13 @@ impl eframe::App for App {
                 
                 // Split shortcuts
                 if i.modifiers.shift {
-                    if i.key_pressed(egui::Key::V) {
-                        self.split_focused_panel(SplitDirection::Vertical);
-                    }
-                    if i.key_pressed(egui::Key::H) {
+                    
+                    if i.key_pressed(egui::Key::D) {
                         self.split_focused_panel(SplitDirection::Horizontal);
+                    }
+                }else{
+                    if i.key_pressed(egui::Key::D) {
+                        self.split_focused_panel(SplitDirection::Vertical);
                     }
                 }
                 
