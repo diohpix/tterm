@@ -33,13 +33,13 @@ pub struct TerminalTab {
 
 pub struct App {
     tabs: HashMap<u64, TerminalTab>,
+    tab_order: Vec<u64>, // Maintain tab order
     active_tab_id: u64,
     next_tab_id: u64,
     terminals: HashMap<u64, TerminalBackend>, // All terminal backends
     next_terminal_id: u64,
     tab_layouts: HashMap<u64, PanelContent>, // Layout for each tab
     view_mode: ViewMode,
-    grid_terminals: Vec<u64>, // Terminals to show in grid mode
     focused_terminal: Option<u64>,
     // Broadcasting
     broadcast_mode: bool,
@@ -56,13 +56,13 @@ impl App {
         
         let mut app = Self {
             tabs: HashMap::new(),
+            tab_order: Vec::new(),
             active_tab_id: 0,
             next_tab_id: 1,
             terminals: HashMap::new(),
             next_terminal_id: 1,
             tab_layouts: HashMap::new(),
             view_mode: ViewMode::Single,
-            grid_terminals: Vec::new(),
             focused_terminal: None,
             broadcast_mode: false,
             selected_terminals: HashSet::new(),
@@ -93,12 +93,10 @@ impl App {
         let layout = PanelContent::Terminal(terminal_id);
         
         self.tabs.insert(tab_id, tab);
+        self.tab_order.push(tab_id); // Maintain order
         self.tab_layouts.insert(tab_id, layout);
         self.active_tab_id = tab_id;
         self.focused_terminal = Some(terminal_id);
-        
-        // Add to grid terminals for grid view
-        self.grid_terminals.push(terminal_id);
     }
     
     fn create_terminal(&mut self) -> u64 {
@@ -120,12 +118,6 @@ impl App {
         .unwrap();
         
         self.terminals.insert(terminal_id, terminal_backend);
-        
-        // Add to grid view if not already there
-        if !self.grid_terminals.contains(&terminal_id) {
-            self.grid_terminals.push(terminal_id);
-        }
-        
         terminal_id
     }
     
@@ -139,13 +131,16 @@ impl App {
             }
             
             self.tabs.remove(&tab_id);
+            self.tab_order.retain(|&id| id != tab_id); // Remove from order
             
             // If we closed the active tab, switch to another one
             if self.active_tab_id == tab_id {
-                self.active_tab_id = *self.tabs.keys().next().unwrap();
-                // Update focused terminal
-                if let Some(layout) = self.tab_layouts.get(&self.active_tab_id) {
-                    self.focused_terminal = self.get_first_terminal_id(layout);
+                if let Some(&next_tab_id) = self.tab_order.first() {
+                    self.active_tab_id = next_tab_id;
+                    // Update focused terminal
+                    if let Some(layout) = self.tab_layouts.get(&self.active_tab_id) {
+                        self.focused_terminal = self.get_first_terminal_id(layout);
+                    }
                 }
             }
         }
@@ -172,29 +167,42 @@ impl App {
     fn render_tab_bar(&mut self, ui: &mut Ui) {
         ui.horizontal(|ui| {
             let mut tab_to_close = None;
+            let mut tab_to_activate = None;
             
-            for (&tab_id, tab) in &self.tabs {
-                let is_active = tab_id == self.active_tab_id;
-                
-                ui.group(|ui| {
-                    ui.horizontal(|ui| {
-                        let tab_response = ui.selectable_label(is_active, &tab.title);
-                        
-                        if tab_response.clicked() {
-                            self.active_tab_id = tab_id;
-                        }
-                        
-                        // Close button
-                        if ui.small_button("×").clicked() && self.tabs.len() > 1 {
-                            tab_to_close = Some(tab_id);
-                        }
+            // Use tab_order to maintain consistent order
+            for &tab_id in &self.tab_order {
+                if let Some(tab) = self.tabs.get(&tab_id) {
+                    let is_active = tab_id == self.active_tab_id;
+                    
+                    ui.group(|ui| {
+                        ui.horizontal(|ui| {
+                            let tab_response = ui.selectable_label(is_active, &tab.title);
+                            
+                            if tab_response.clicked() {
+                                tab_to_activate = Some(tab_id);
+                            }
+                            
+                            // Close button
+                            if ui.small_button("×").clicked() && self.tabs.len() > 1 {
+                                tab_to_close = Some(tab_id);
+                            }
+                        });
                     });
-                });
+                }
             }
             
             // New tab button
             if ui.button("+").clicked() {
                 self.create_new_tab();
+            }
+            
+            // Handle tab activation outside the closure
+            if let Some(tab_id) = tab_to_activate {
+                self.active_tab_id = tab_id;
+                // Update focus to the first terminal in this tab
+                if let Some(layout) = self.tab_layouts.get(&tab_id) {
+                    self.focused_terminal = self.get_first_terminal_id(layout);
+                }
             }
             
             if let Some(tab_id) = tab_to_close {
@@ -334,8 +342,13 @@ impl App {
     fn toggle_grid_view(&mut self) {
         self.view_mode = match self.view_mode {
             ViewMode::Single => {
+                // Don't switch to grid view if only one terminal exists
+                if self.terminals.len() <= 1 {
+                    return; // Stay in single view
+                }
+                
                 // Calculate optimal grid size based on number of terminals
-                let terminal_count = self.grid_terminals.len();
+                let terminal_count = self.terminals.len();
                 let cols = (terminal_count as f32).sqrt().ceil() as usize;
                 let rows = (terminal_count as f32 / cols as f32).ceil() as usize;
                 ViewMode::Grid { rows: rows.max(1), cols: cols.max(1) }
@@ -349,7 +362,10 @@ impl App {
             let cell_width = available_rect.width() / cols as f32;
             let cell_height = available_rect.height() / rows as f32;
             
-            for (idx, &terminal_id) in self.grid_terminals.iter().enumerate() {
+            // Get all terminal IDs for grid view
+            let terminal_ids: Vec<u64> = self.terminals.keys().cloned().collect();
+            
+            for (idx, &terminal_id) in terminal_ids.iter().enumerate() {
                 if idx >= rows * cols {
                     break; // Don't render more than grid capacity
                 }
@@ -384,10 +400,13 @@ impl App {
                         egui::epaint::StrokeKind::Outside,
                     );
                     
-                    // Handle click for focus
-                    let response = ui.allocate_rect(cell_rect, egui::Sense::click());
-                    if response.clicked() {
-                        self.focused_terminal = Some(terminal_id);
+                    // Check for mouse click in this cell area
+                    if ui.input(|i| i.pointer.any_click()) {
+                        if let Some(pos) = ui.input(|i| i.pointer.interact_pos()) {
+                            if cell_rect.contains(pos) {
+                                self.focused_terminal = Some(terminal_id);
+                            }
+                        }
                     }
                     
                     // Render terminal
@@ -490,9 +509,12 @@ impl eframe::App for App {
                 // Tab switching with Ctrl+1-9
                 for (idx, &key) in [egui::Key::Num1, egui::Key::Num2, egui::Key::Num3, egui::Key::Num4, egui::Key::Num5, egui::Key::Num6, egui::Key::Num7, egui::Key::Num8, egui::Key::Num9].iter().enumerate() {
                     if i.key_pressed(key) {
-                        let tab_ids: Vec<_> = self.tabs.keys().cloned().collect();
-                        if idx < tab_ids.len() {
-                            self.active_tab_id = tab_ids[idx];
+                        if idx < self.tab_order.len() {
+                            self.active_tab_id = self.tab_order[idx];
+                            // Update focus to the first terminal in this tab
+                            if let Some(layout) = self.tab_layouts.get(&self.active_tab_id) {
+                                self.focused_terminal = self.get_first_terminal_id(layout);
+                            }
                         }
                     }
                 }
