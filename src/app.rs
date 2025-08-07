@@ -547,7 +547,7 @@ impl eframe::App for App {
         
         // Handle keyboard shortcuts
         ctx.input(|i| {
-            if i.modifiers.mac_cmd {
+            if i.modifiers.command {
                 if i.key_pressed(egui::Key::T) {
                     self.create_new_tab();
                 }
