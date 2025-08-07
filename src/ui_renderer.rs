@@ -2,6 +2,7 @@ use crate::types::{AppState, ViewMode, PanelContent, SplitDirection};
 use crate::tab_manager::TabManager;
 use crate::grid_manager::GridManager;
 use crate::broadcast_manager::BroadcastManager;
+use crate::ime::cjk;
 use egui::{Ui, Rect, Vec2, Pos2, FontId, Align2};
 use egui_term::TerminalView;
 
@@ -129,8 +130,8 @@ impl UiRenderer {
                 ui.add(terminal)
             });
             
-            // Render Korean composition overlay if composing
-            Self::render_korean_composition_overlay(state, ui, terminal_id, available_rect);
+            // Render CJK double-wide cursor overlay (includes Korean composition)
+            Self::render_cjk_cursor_overlay(state, ui, terminal_id, available_rect);
             
             // Check if the terminal area was clicked
             if ui.input(|i| i.pointer.any_click()) {
@@ -486,79 +487,94 @@ impl UiRenderer {
         );
     }
     
-    /// Render Korean composition overlay on terminal
-    fn render_korean_composition_overlay(
+    /// Render CJK double-wide cursor overlay on terminal
+    /// This handles both Korean composition and completed CJK characters
+    fn render_cjk_cursor_overlay(
         state: &AppState,
         ui: &mut Ui,
         terminal_id: u64,
         terminal_rect: Rect,
     ) {
-        // Check if this terminal has active Korean composition
-        if let Some(korean_state) = state.korean_input_states.get(&terminal_id) {
-            if korean_state.is_composing {
-                if let Some(composing_char) = korean_state.get_current_char() {
-                    // Get terminal backend to access cursor position
-                    if let Some(terminal) = state.terminals.get(&terminal_id) {
-                        // Calculate cursor position in egui coordinates
-                        let cursor_pos = Self::terminal_cursor_to_screen_pos(
-                            terminal,
-                            terminal_rect,
-                        );
-                        
-                        // Get the actual terminal font settings
-                        let content = terminal.last_content();
-                        let terminal_size = &content.terminal_size;
-                        let font_size = terminal_size.cell_height as f32;
-                        let single_char_width = terminal_size.cell_width as f32;
-                        let char_height = terminal_size.cell_height as f32;
-                        
-                        // Double-wide cursor for Korean composition
-                        let double_char_width = single_char_width * 2.0;
-                        
-                        // Use the monospace font family (which includes D2Coding from app.rs configuration)
-                        let font_id = FontId::new(font_size, egui::FontFamily::Monospace);
-                        
-                        // Define colors for better visibility
-                        let cursor_bg_color = egui::Color32::from_rgb(255, 255, 255); // White background for cursor
-                        let cursor_fg_color = egui::Color32::from_rgb(0, 0, 0); // Black text on white background
-                        
-                        // Draw double-wide cursor background
-                        ui.painter().rect_filled(
-                            Rect::from_min_size(
-                                cursor_pos,
-                                Vec2::new(double_char_width, char_height),
-                            ),
-                            egui::Rounding::ZERO,
-                            cursor_bg_color,
-                        );
-                        
-                        // Draw the composing character with inverted colors (black text on white background)
-                        // Center the text in the double-wide cursor area
-                        let text_pos = Pos2::new(
-                            cursor_pos.x + double_char_width / 2.0,
-                            cursor_pos.y,
-                        );
-                        
-                        ui.painter().text(
-                            text_pos,
-                            Align2::CENTER_TOP,
-                            composing_char.to_string(),
-                            font_id,
-                            cursor_fg_color,
-                        );
-                        
-                        // Draw a subtle border around the cursor for better definition
-                        ui.painter().rect_stroke(
-                            Rect::from_min_size(
-                                cursor_pos,
-                                Vec2::new(double_char_width, char_height),
-                            ),
-                            egui::Rounding::ZERO,
-                            egui::Stroke::new(1.0, egui::Color32::from_rgb(128, 128, 128)),
-                            egui::epaint::StrokeKind::Outside,
-                        );
-                    }
+        if let Some(terminal) = state.terminals.get(&terminal_id) {
+            // Calculate cursor position in egui coordinates
+            let cursor_pos = Self::terminal_cursor_to_screen_pos(
+                terminal,
+                terminal_rect,
+            );
+            
+            // Get the actual terminal font settings
+            let content = terminal.last_content();
+            let terminal_size = &content.terminal_size;
+            let font_size = terminal_size.cell_height as f32;
+            let single_char_width = terminal_size.cell_width as f32;
+            let char_height = terminal_size.cell_height as f32;
+            
+            // Check for Korean composition first
+            let korean_state = state.korean_input_states.get(&terminal_id);
+            let composing_char = korean_state
+                .filter(|state| state.is_composing)
+                .and_then(|state| state.get_current_char());
+            
+            // Get character at cursor position from terminal content
+            let cursor_point = content.grid.cursor.point;
+            let char_at_cursor = content.grid.display_iter()
+                .find(|indexed| indexed.point == cursor_point)
+                .map(|indexed| indexed.c);
+            
+            // Determine if we should show double-wide cursor
+            let should_show_double = cjk::should_show_double_cursor(composing_char, char_at_cursor);
+            
+            if should_show_double {
+                let cursor_width = if composing_char.is_some() || 
+                    char_at_cursor.map_or(false, cjk::is_double_width_char) {
+                    single_char_width * 2.0
+                } else {
+                    single_char_width
+                };
+                
+                // Use the monospace font family (which includes D2Coding from app.rs configuration)
+                let font_id = FontId::new(font_size, egui::FontFamily::Monospace);
+                
+                // Define colors for better visibility
+                let cursor_bg_color = egui::Color32::from_rgb(255, 255, 255); // White background for cursor
+                let cursor_fg_color = egui::Color32::from_rgb(0, 0, 0); // Black text on white background
+                
+                // Draw double-wide cursor background
+                ui.painter().rect_filled(
+                    Rect::from_min_size(
+                        cursor_pos,
+                        Vec2::new(cursor_width, char_height),
+                    ),
+                    egui::Rounding::ZERO,
+                    cursor_bg_color,
+                );
+                
+                // Draw the character with inverted colors
+                if let Some(display_char) = composing_char.or(char_at_cursor) {
+                    let text_pos = Pos2::new(
+                        cursor_pos.x + cursor_width / 2.0,
+                        cursor_pos.y,
+                    );
+                    
+                    ui.painter().text(
+                        text_pos,
+                        Align2::CENTER_TOP,
+                        display_char.to_string(),
+                        font_id,
+                        cursor_fg_color,
+                    );
                 }
+                
+                // Draw a subtle border around the cursor for better definition
+                ui.painter().rect_stroke(
+                    Rect::from_min_size(
+                        cursor_pos,
+                        Vec2::new(cursor_width, char_height),
+                    ),
+                    egui::Rounding::ZERO,
+                    egui::Stroke::new(1.0, egui::Color32::from_rgb(128, 128, 128)),
+                    egui::epaint::StrokeKind::Outside,
+                );
             }
         }
     }
