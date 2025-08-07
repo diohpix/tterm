@@ -97,6 +97,9 @@ impl App {
         self.tab_layouts.insert(tab_id, layout);
         self.active_tab_id = tab_id;
         self.focused_terminal = Some(terminal_id);
+        
+        // Update grid size after tab creation
+        self.update_grid_size();
     }
     
     fn create_terminal(&mut self) -> u64 {
@@ -132,6 +135,9 @@ impl App {
             
             self.tabs.remove(&tab_id);
             self.tab_order.retain(|&id| id != tab_id); // Remove from order
+            
+            // Update grid size after tab removal
+            self.update_grid_size();
             
             // If we closed the active tab, switch to another one
             if self.active_tab_id == tab_id {
@@ -344,6 +350,39 @@ impl App {
         }
     }
     
+    fn calculate_optimal_grid_size(&self, tab_count: usize) -> (usize, usize) {
+        if tab_count <= 1 {
+            return (1, 1);
+        }
+        
+        match tab_count {
+            2 => (1, 2), // 1x2 for 2 tabs (horizontal)
+            3 => (2, 2), // 2x2 for 3 tabs (3rd tab spans full width on bottom)
+            4 => (2, 2), // 2x2 for 4 tabs (perfect fit)
+            5..=6 => (2, 3), // 2x3 for 5-6 tabs
+            7..=9 => (3, 3), // 3x3 for 7-9 tabs
+            _ => {
+                // For larger numbers, use sqrt calculation
+                let cols = (tab_count as f32).sqrt().ceil() as usize;
+                let rows = (tab_count as f32 / cols as f32).ceil() as usize;
+                (rows.max(1), cols.max(1))
+            }
+        }
+    }
+    
+    fn update_grid_size(&mut self) {
+        if let ViewMode::Grid { .. } = self.view_mode {
+            let tab_count = self.tabs.len();
+            if tab_count <= 1 {
+                // If only one tab left, switch to single view to fill the screen
+                self.view_mode = ViewMode::Single;
+            } else {
+                let (rows, cols) = self.calculate_optimal_grid_size(tab_count);
+                self.view_mode = ViewMode::Grid { rows, cols };
+            }
+        }
+    }
+    
     fn toggle_grid_view(&mut self) {
         self.view_mode = match self.view_mode {
             ViewMode::Single => {
@@ -352,11 +391,8 @@ impl App {
                     return; // Stay in single view
                 }
                 
-                // Calculate optimal grid size based on number of tabs
-                let tab_count = self.tabs.len();
-                let cols = (tab_count as f32).sqrt().ceil() as usize;
-                let rows = (tab_count as f32 / cols as f32).ceil() as usize;
-                ViewMode::Grid { rows: rows.max(1), cols: cols.max(1) }
+                let (rows, cols) = self.calculate_optimal_grid_size(self.tabs.len());
+                ViewMode::Grid { rows, cols }
             }
             ViewMode::Grid { .. } => ViewMode::Single,
         };
@@ -364,6 +400,7 @@ impl App {
     
     fn render_grid_view(&mut self, ui: &mut Ui, available_rect: Rect) {
         if let ViewMode::Grid { rows, cols } = self.view_mode {
+            let tab_count = self.tabs.len();
             let cell_width = available_rect.width() / cols as f32;
             let cell_height = available_rect.height() / rows as f32;
             
@@ -375,13 +412,26 @@ impl App {
                 let row = idx / cols;
                 let col = idx % cols;
                 
-                let cell_rect = Rect::from_min_size(
-                    egui::pos2(
-                        available_rect.min.x + col as f32 * cell_width,
-                        available_rect.min.y + row as f32 * cell_height,
-                    ),
-                    egui::vec2(cell_width - 2.0, cell_height - 2.0), // Small gap between cells
-                );
+                // Special handling for 3 tabs in 2x2 grid: 3rd tab spans full width
+                let cell_rect = if tab_count == 3 && rows == 2 && cols == 2 && idx == 2 {
+                    // Third tab spans full width on bottom row
+                    Rect::from_min_size(
+                        egui::pos2(
+                            available_rect.min.x,
+                            available_rect.min.y + cell_height,
+                        ),
+                        egui::vec2(available_rect.width() - 2.0, cell_height - 2.0),
+                    )
+                } else {
+                    // Normal grid cell
+                    Rect::from_min_size(
+                        egui::pos2(
+                            available_rect.min.x + col as f32 * cell_width,
+                            available_rect.min.y + row as f32 * cell_height,
+                        ),
+                        egui::vec2(cell_width - 2.0, cell_height - 2.0), // Small gap between cells
+                    )
+                };
                 
                 // Get tab layout and render it
                 if let Some(tab) = self.tabs.get(&tab_id) {
