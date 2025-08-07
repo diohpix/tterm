@@ -133,6 +133,9 @@ impl App {
     
     fn close_tab(&mut self, tab_id: u64) {
         if self.tabs.len() > 1 {
+            // Find the index of the tab to be closed BEFORE removing it
+            let closed_tab_index = self.tab_order.iter().position(|&id| id == tab_id);
+            
             // Remove associated terminals
             if let Some(layout) = self.tab_layouts.remove(&tab_id) {
                 self.collect_terminal_ids(&layout).into_iter().for_each(|tid| {
@@ -146,13 +149,32 @@ impl App {
             // Update grid size after tab removal
             self.update_grid_size();
             
-            // If we closed the active tab, switch to another one
+            // If we closed the active tab, switch to a smart previous/next tab
             if self.active_tab_id == tab_id {
-                if let Some(&next_tab_id) = self.tab_order.first() {
-                    self.active_tab_id = next_tab_id;
-                    // Update focused terminal
-                    if let Some(layout) = self.tab_layouts.get(&self.active_tab_id) {
-                        self.focused_terminal = self.get_first_terminal_id(layout);
+                if let Some(closed_index) = closed_tab_index {
+                    // Try to go to the previous tab (left), or next tab (right) if it was the first
+                    let next_tab_id = if closed_index > 0 {
+                        // Go to previous tab (index - 1)
+                        self.tab_order.get(closed_index - 1).copied()
+                    } else {
+                        // This was the first tab, go to the new first tab
+                        self.tab_order.first().copied()
+                    };
+                    
+                    if let Some(tab_id) = next_tab_id {
+                        self.active_tab_id = tab_id;
+                        // Update focused terminal
+                        if let Some(layout) = self.tab_layouts.get(&self.active_tab_id) {
+                            self.focused_terminal = self.get_first_terminal_id(layout);
+                        }
+                    }
+                } else {
+                    // Fallback: go to first tab
+                    if let Some(&next_tab_id) = self.tab_order.first() {
+                        self.active_tab_id = next_tab_id;
+                        if let Some(layout) = self.tab_layouts.get(&self.active_tab_id) {
+                            self.focused_terminal = self.get_first_terminal_id(layout);
+                        }
                     }
                 }
             }
@@ -298,7 +320,7 @@ impl App {
                     );
                     
                     let terminal = TerminalView::new(ui, terminal_backend)
-                        .set_focus(is_focused)
+                        .set_focus(false) // Disable focus on TerminalView to prevent mouse dependency
                         .set_size(Vec2::new(available_rect.width(), available_rect.height()));
                     
                     // Render terminal and check for clicks
@@ -609,8 +631,8 @@ impl App {
             for col in 0..cols-1 {
                 let sep_x = available_rect.min.x + col_positions[col + 1];
                 
-                // Special handling for 3 tabs: don't draw column separator in bottom row where tab spans full width
-                let separator_rect = if tab_count == 3 && cols == 2 && rows == 2 {
+                // Special handling for 3 or fewer tabs: don't draw column separator in bottom row where tab spans full width
+                let separator_rect = if tab_count <= 3 && cols == 2 && rows == 2 {
                     // For 3 tabs in 2x2, only draw separator in top row
                     let bottom_row_y = available_rect.min.y + row_positions[1];
                     Rect::from_min_max(
@@ -964,6 +986,104 @@ impl App {
             }
         }
     }
+    
+    fn handle_direct_input_to_focused_terminal(&mut self, ctx: &egui::Context) {
+        if let Some(focused_terminal_id) = self.focused_terminal {
+            let broadcast_mode = self.broadcast_mode;
+            
+            // First collect the events we need to process
+            let events = ctx.input(|i| i.events.clone());
+            
+            for event in events {
+                match event {
+                    egui::Event::Text(text) => {
+                        if broadcast_mode {
+                            self.broadcast_input(&text);
+                        } else if let Some(terminal) = self.terminals.get_mut(&focused_terminal_id) {
+                            terminal.process_command(egui_term::BackendCommand::Write(text.as_bytes().to_vec()));
+                        }
+                    }
+                    egui::Event::Key { key, pressed: true, modifiers, .. } => {
+                        // Handle special keys that should go to terminal
+                        let input_bytes = match key {
+                            egui::Key::Enter => Some(b"\r".to_vec()),
+                            egui::Key::Tab => Some(b"\t".to_vec()),
+                            egui::Key::Backspace => Some(b"\x7f".to_vec()),
+                            egui::Key::Delete => Some(b"\x1b[3~".to_vec()),
+                            egui::Key::ArrowUp => Some(b"\x1b[A".to_vec()),
+                            egui::Key::ArrowDown => Some(b"\x1b[B".to_vec()),
+                            egui::Key::ArrowRight => Some(b"\x1b[C".to_vec()),
+                            egui::Key::ArrowLeft => Some(b"\x1b[D".to_vec()),
+                            egui::Key::Home => Some(b"\x1b[H".to_vec()),
+                            egui::Key::End => Some(b"\x1b[F".to_vec()),
+                            egui::Key::PageUp => Some(b"\x1b[5~".to_vec()),
+                            egui::Key::PageDown => Some(b"\x1b[6~".to_vec()),
+                            egui::Key::Escape => Some(b"\x1b".to_vec()),
+                            _ => {
+                                // Handle Ctrl combinations (but skip application shortcuts)
+                                if modifiers.ctrl || modifiers.command {
+                                    // Skip shortcuts that are handled by application 
+                                    match key {
+                                        // Skip these as they are application shortcuts
+                                        egui::Key::T | egui::Key::W | egui::Key::S 
+                                        | egui::Key::Num1 | egui::Key::Num2 | egui::Key::Num3 
+                                        | egui::Key::Num4 | egui::Key::Num5 | egui::Key::Num6 
+                                        | egui::Key::Num7 | egui::Key::Num8 | egui::Key::Num9 => None,
+                                        egui::Key::D if modifiers.shift => None, // Skip horizontal split
+                                        egui::Key::D => None, // Skip vertical split
+                                        egui::Key::B if modifiers.shift => None, // Skip broadcast toggle
+                                        egui::Key::A if modifiers.shift => None, // Skip select all toggle
+                                        // Process regular Ctrl combinations for terminal
+                                        egui::Key::A => Some(b"\x01".to_vec()),
+                                        egui::Key::B => Some(b"\x02".to_vec()),
+                                        egui::Key::C => Some(b"\x03".to_vec()),
+                                        egui::Key::E => Some(b"\x05".to_vec()),
+                                        egui::Key::F => Some(b"\x06".to_vec()),
+                                        egui::Key::G => Some(b"\x07".to_vec()),
+                                        egui::Key::H => Some(b"\x08".to_vec()),
+                                        egui::Key::I => Some(b"\x09".to_vec()),
+                                        egui::Key::J => Some(b"\x0a".to_vec()),
+                                        egui::Key::K => Some(b"\x0b".to_vec()),
+                                        egui::Key::L => Some(b"\x0c".to_vec()),
+                                        egui::Key::M => Some(b"\x0d".to_vec()),
+                                        egui::Key::N => Some(b"\x0e".to_vec()),
+                                        egui::Key::O => Some(b"\x0f".to_vec()),
+                                        egui::Key::P => Some(b"\x10".to_vec()),
+                                        egui::Key::Q => Some(b"\x11".to_vec()),
+                                        egui::Key::R => Some(b"\x12".to_vec()),
+                                        egui::Key::U => Some(b"\x15".to_vec()),
+                                        egui::Key::V => Some(b"\x16".to_vec()),
+                                        egui::Key::X => Some(b"\x18".to_vec()),
+                                        egui::Key::Y => Some(b"\x19".to_vec()),
+                                        egui::Key::Z => Some(b"\x1a".to_vec()),
+                                        _ => None
+                                    }
+                                } else {
+                                    None
+                                }
+                            }
+                        };
+                        
+                        if let Some(bytes) = input_bytes {
+                            if broadcast_mode {
+                                self.broadcast_input(&String::from_utf8_lossy(&bytes));
+                            } else if let Some(terminal) = self.terminals.get_mut(&focused_terminal_id) {
+                                terminal.process_command(egui_term::BackendCommand::Write(bytes));
+                            }
+                        }
+                    }
+                    egui::Event::Paste(text) => {
+                        if broadcast_mode {
+                            self.broadcast_input(&text);
+                        } else if let Some(terminal) = self.terminals.get_mut(&focused_terminal_id) {
+                            terminal.process_command(egui_term::BackendCommand::Write(text.as_bytes().to_vec()));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
 }
 
 impl eframe::App for App {
@@ -978,14 +1098,17 @@ impl eframe::App for App {
             }
         }
         
-        // Handle keyboard shortcuts
+        // Handle keyboard shortcuts and input redirection
+        let mut handled_by_shortcuts = false;
         ctx.input(|i| {
             if i.modifiers.command {
                 if i.key_pressed(egui::Key::T) {
                     self.create_new_tab();
+                    handled_by_shortcuts = true;
                 }
                 if i.key_pressed(egui::Key::W) && self.tabs.len() > 1 {
                     self.close_tab(self.active_tab_id);
+                    handled_by_shortcuts = true;
                 }
                 // Tab switching with Ctrl+1-9
                 for (idx, &key) in [egui::Key::Num1, egui::Key::Num2, egui::Key::Num3, egui::Key::Num4, egui::Key::Num5, egui::Key::Num6, egui::Key::Num7, egui::Key::Num8, egui::Key::Num9].iter().enumerate() {
@@ -996,6 +1119,7 @@ impl eframe::App for App {
                             if let Some(layout) = self.tab_layouts.get(&self.active_tab_id) {
                                 self.focused_terminal = self.get_first_terminal_id(layout);
                             }
+                            handled_by_shortcuts = true;
                         }
                     }
                 }
@@ -1005,22 +1129,26 @@ impl eframe::App for App {
                     
                     if i.key_pressed(egui::Key::D) {
                         self.split_focused_panel(SplitDirection::Horizontal);
+                        handled_by_shortcuts = true;
                     }
                 }else{
                     if i.key_pressed(egui::Key::D) {
                         self.split_focused_panel(SplitDirection::Vertical);
+                        handled_by_shortcuts = true;
                     }
                 }
                 
                 // Grid view toggle (Ctrl+S as per PRD)
                 if i.key_pressed(egui::Key::S) {
                     self.toggle_grid_view();
+                    handled_by_shortcuts = true;
                 }
                 
                 // Broadcast shortcuts
                 if i.modifiers.shift {
                     if i.key_pressed(egui::Key::B) {
                         self.toggle_broadcast_mode();
+                        handled_by_shortcuts = true;
                     }
                     if i.key_pressed(egui::Key::A) {
                         // Toggle all terminals selection
@@ -1030,6 +1158,7 @@ impl eframe::App for App {
                             } else {
                                 self.selected_terminals = self.terminals.keys().cloned().collect();
                             }
+                            handled_by_shortcuts = true;
                         }
                     }
                 }
@@ -1040,9 +1169,15 @@ impl eframe::App for App {
                 if i.key_pressed(egui::Key::ArrowLeft) || i.key_pressed(egui::Key::ArrowRight) ||
                    i.key_pressed(egui::Key::ArrowUp) || i.key_pressed(egui::Key::ArrowDown) {
                     self.navigate_focus_in_splits();
+                    handled_by_shortcuts = true;
                 }
             }
         });
+
+        // Handle direct keyboard input to focused terminal (if not handled by shortcuts)
+        if !handled_by_shortcuts {
+            self.handle_direct_input_to_focused_terminal(ctx);
+        }
 
         // Top panel for tabs (only show in single mode)
         if matches!(self.view_mode, ViewMode::Single) {
