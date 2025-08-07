@@ -2,6 +2,13 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")] // hide console window on Windows in release
 
 mod app;
+mod types;
+mod tab_manager;
+mod split_manager;
+mod grid_manager;
+mod broadcast_manager;
+mod input_handler;
+mod ui_renderer;
 
 fn main() -> eframe::Result {
     env_logger::init();
