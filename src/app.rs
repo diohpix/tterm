@@ -11,13 +11,27 @@ pub struct App {
 
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        Self::new_with_session(cc, None)
+    }
+    
+    pub fn new_with_session(cc: &eframe::CreationContext<'_>, attach_session_id: Option<uuid::Uuid>) -> Self {
         // Load and configure Korean fonts
         Self::configure_korean_fonts(&cc.egui_ctx);
         
         let mut state = AppState::new(cc);
         
-        // Create the first tab
-        TabManager::create_new_tab(&mut state);
+        if let Some(session_id) = attach_session_id {
+            // Attempt to attach to existing session
+            let egui_ctx = cc.egui_ctx.clone();
+            tokio::spawn(async move {
+                // This is a simplified approach - in practice, we'd need better state management
+                log::info!("Attempting to attach to session: {:?}", session_id);
+                egui_ctx.request_repaint();
+            });
+        } else {
+            // Create the first tab for new instance
+            TabManager::create_new_tab(&mut state);
+        }
         
         Self { state }
     }

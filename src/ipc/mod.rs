@@ -3,7 +3,7 @@ pub mod client;
 pub mod server;
 
 pub use messages::*;
-pub use client::IpcClient;
+pub use client::DaemonClient;
 pub use server::IpcServer;
 
 /// Unix domain socket path for IPC communication

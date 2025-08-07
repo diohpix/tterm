@@ -11,9 +11,31 @@ mod input_handler;
 mod ui_renderer;
 mod ime;
 pub mod ipc;
+pub mod session;
+
+use std::env;
+use uuid::Uuid;
 
 fn main() -> eframe::Result {
     env_logger::init();
+    
+    // Parse command line arguments
+    let args: Vec<String> = env::args().collect();
+    let mut attach_session_id: Option<Uuid> = None;
+    
+    // Check for --attach-session argument
+    if args.len() >= 3 && args[1] == "--attach-session" {
+        match Uuid::parse_str(&args[2]) {
+            Ok(session_id) => {
+                attach_session_id = Some(session_id);
+                log::info!("Starting with attach to session: {:?}", session_id);
+            }
+            Err(e) => {
+                log::error!("Invalid session ID: {}", e);
+                std::process::exit(1);
+            }
+        }
+    }
 
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -23,8 +45,8 @@ fn main() -> eframe::Result {
     };
 
     eframe::run_native(
-        "full_screen_example",
+        "TTerminal",
         native_options,
-        Box::new(|cc| Ok(Box::new(app::App::new(cc)))),
+        Box::new(move |cc| Ok(Box::new(app::App::new_with_session(cc, attach_session_id)))),
     )
 }
