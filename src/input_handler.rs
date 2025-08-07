@@ -35,6 +35,20 @@ impl InputHandler {
                     handled_by_shortcuts = true;
                 }
                 
+                // New window shortcut
+                if i.key_pressed(Key::N) {
+                    Self::create_new_window();
+                    handled_by_shortcuts = true;
+                }
+                
+                // Detach current tab to new window (Cmd+O)
+                if i.key_pressed(Key::O) {
+                    if let Some(focused_terminal_id) = state.focused_terminal {
+                        Self::detach_terminal_to_new_window(state, focused_terminal_id);
+                        handled_by_shortcuts = true;
+                    }
+                }
+                
                 // Tab switching with Ctrl+1-9
                 for (idx, &key) in [Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5, Key::Num6, Key::Num7, Key::Num8, Key::Num9].iter().enumerate() {
                     if i.key_pressed(key) {
@@ -403,5 +417,15 @@ impl InputHandler {
         }
         
         result
+    }
+    
+    /// Create a new window by launching a new process
+    fn create_new_window() {
+        // Get the current executable path
+        if let Ok(current_exe) = std::env::current_exe() {
+            // Launch a new instance of the application
+            let _ = std::process::Command::new(current_exe)
+                .spawn();
+        }
     }
 }
