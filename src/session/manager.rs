@@ -23,7 +23,7 @@ impl SessionManager {
         }
     }
     
-    pub fn create_session(
+    pub async fn create_session(
         &mut self,
         session_id: Uuid,
         shell: String,
@@ -35,7 +35,7 @@ impl SessionManager {
             return Err(format!("Session {:?} already exists", session_id).into());
         }
         
-        let session = PtySession::new(session_id, shell, working_directory)?;
+        let session = PtySession::new(session_id, shell, working_directory).await?;
         self.sessions.insert(session_id, session);
         
         info!("Session created successfully: {:?}", session_id);
@@ -78,6 +78,14 @@ impl SessionManager {
     pub fn send_input_to_session(&mut self, session_id: Uuid, data: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
         if let Some(session) = self.sessions.get_mut(&session_id) {
             session.send_input(data)
+        } else {
+            Err(format!("Session {:?} not found", session_id).into())
+        }
+    }
+    
+    pub fn read_output_from_session(&mut self, session_id: Uuid) -> Result<Option<Vec<u8>>, Box<dyn std::error::Error>> {
+        if let Some(session) = self.sessions.get_mut(&session_id) {
+            Ok(session.read_output())
         } else {
             Err(format!("Session {:?} not found", session_id).into())
         }

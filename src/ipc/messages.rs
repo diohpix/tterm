@@ -29,6 +29,10 @@ pub enum ClientMessage {
         session_id: Uuid,
         data: Vec<u8>,
     },
+    /// Request to read output from session
+    ReadOutput {
+        session_id: Uuid,
+    },
     /// Request session list
     ListSessions,
     /// Terminate session

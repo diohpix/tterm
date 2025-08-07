@@ -1,6 +1,6 @@
 use std::time::Duration;
 use tokio::net::UnixStream;
-use tokio::io::{AsyncWriteExt, AsyncReadExt};
+use tokio::io::{AsyncWriteExt, AsyncBufReadExt, BufReader};
 use uuid::Uuid;
 use log::info;
 
@@ -13,45 +13,55 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("Connecting to PTY daemon...");
     
     // Connect to daemon
-    let mut stream = UnixStream::connect(SOCKET_PATH).await?;
+    let stream = UnixStream::connect(SOCKET_PATH).await?;
     info!("Connected to daemon");
     
+    let mut reader = BufReader::new(stream);
     let client_id = Uuid::new_v4();
     let session_id = Uuid::new_v4();
     
+    // Helper function to send message and read response
+    async fn send_and_receive(reader: &mut BufReader<UnixStream>, message: ClientMessage) -> Result<(), Box<dyn std::error::Error>> {
+        let json = serde_json::to_string(&message)?;
+        reader.get_mut().write_all(json.as_bytes()).await?;
+        reader.get_mut().write_all(b"\n").await?;
+        
+        let mut response_line = String::new();
+        reader.read_line(&mut response_line).await?;
+        
+        if !response_line.trim().is_empty() {
+            match serde_json::from_str::<DaemonMessage>(response_line.trim()) {
+                Ok(response) => info!("Response: {:?}", response),
+                Err(e) => info!("Failed to parse response: {}, raw: {}", e, response_line.trim()),
+            }
+        }
+        
+        Ok(())
+    }
+    
     // Test: Register client
+    info!("Registering client...");
     let register_msg = ClientMessage::RegisterClient { client_id };
-    let json = serde_json::to_string(&register_msg)?;
-    stream.write_all(json.as_bytes()).await?;
-    stream.write_all(b"\n").await?;
-    info!("Sent register message");
+    send_and_receive(&mut reader, register_msg).await?;
     
     // Test: Create session
+    info!("Creating session...");
     let create_msg = ClientMessage::CreateSession {
         session_id,
         shell: "/bin/bash".to_string(),
         working_directory: Some("/tmp".to_string()),
     };
-    let json = serde_json::to_string(&create_msg)?;
-    stream.write_all(json.as_bytes()).await?;
-    stream.write_all(b"\n").await?;
-    info!("Sent create session message");
+    send_and_receive(&mut reader, create_msg).await?;
     
     // Test: List sessions
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    info!("Listing sessions...");
     let list_msg = ClientMessage::ListSessions;
-    let json = serde_json::to_string(&list_msg)?;
-    stream.write_all(json.as_bytes()).await?;
-    stream.write_all(b"\n").await?;
-    info!("Sent list sessions message");
+    send_and_receive(&mut reader, list_msg).await?;
     
     // Test: Disconnect
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    info!("Disconnecting...");
     let disconnect_msg = ClientMessage::Disconnect { client_id };
-    let json = serde_json::to_string(&disconnect_msg)?;
-    stream.write_all(json.as_bytes()).await?;
-    stream.write_all(b"\n").await?;
-    info!("Sent disconnect message");
+    send_and_receive(&mut reader, disconnect_msg).await?;
     
     info!("Test completed");
     Ok(())
