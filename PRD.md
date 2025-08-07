@@ -393,3 +393,19 @@ TTerminal은 현대적인 개발 환경에서 요구되는 고급 터미널 기�
 - ✅ **Usability**: Intuitive keyboard shortcuts and mouse interactions
 - ✅ **Visual Design**: Clean, modern interface with clear focus indicators
 - ✅ **Code Quality**: Well-structured, maintainable Rust code
+
+
+### 수정사항
+- ✅ **Fixed**: split 된 곳에서 exit 명령을 보내면 전체 프로그램이 종료된다. 해당 split된 부분만 없어지고 pane은 합쳐져야 한다.
+  - 구현된 기능:
+    - 개별 터미널 종료 시 해당 터미널만 제거되고 패널이 자동으로 합쳐짐
+    - 탭에 마지막 터미널인 경우만 탭 전체가 닫힘
+    - 마지막 탭의 마지막 터미널인 경우만 애플리케이션 종료
+    - 포커스가 자동으로 남은 터미널로 이동
+- ✅ **Fixed**: split 된 pane A, B가 있을때 B가 종료되면 포커스는 A로 가야한다.
+  - 구현된 기능:
+    - `find_sibling_terminal_before_removal()` 메서드로 종료되는 터미널의 sibling 터미널을 식별
+    - split 구조에서 한쪽 패널이 종료되면 자동으로 반대편 패널로 포커스 이동
+    - 복잡한 중첩 split 구조에서도 올바른 sibling 터미널로 포커스 전환
+    - **핵심 수정**: 터미널 제거 **전에** sibling을 찾아서 올바른 포커스 전환 보장
+    - 테스트된 시나리오: `[A | [B|C]]` 구조에서 C 종료 시 B로 포커스 이동 ✅    
