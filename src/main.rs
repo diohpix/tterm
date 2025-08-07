@@ -9,6 +9,7 @@ mod grid_manager;
 mod broadcast_manager;
 mod input_handler;
 mod ui_renderer;
+mod ime;
 
 fn main() -> eframe::Result {
     env_logger::init();

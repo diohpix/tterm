@@ -1,6 +1,7 @@
 use egui_term::TerminalBackend;
 use std::collections::{HashMap, HashSet};
 use std::sync::mpsc::{Receiver, Sender};
+use crate::ime::korean::KoreanInputState;
 
 #[derive(Debug, Clone)]
 pub enum ViewMode {
@@ -54,6 +55,9 @@ pub struct AppState {
     pub broadcast_mode: bool,
     pub selected_terminals: HashSet<u64>, // Terminals to broadcast to
     
+    // Korean IME support
+    pub korean_input_states: HashMap<u64, KoreanInputState>, // Per-terminal Korean input state
+    
     // Communication
     pub pty_proxy_receiver: Receiver<(u64, egui_term::PtyEvent)>,
     pub pty_proxy_sender: Sender<(u64, egui_term::PtyEvent)>,
@@ -77,6 +81,7 @@ impl AppState {
             focused_terminal: None,
             broadcast_mode: false,
             selected_terminals: HashSet::new(),
+            korean_input_states: HashMap::new(),
             pty_proxy_receiver,
             pty_proxy_sender,
             egui_ctx,
@@ -102,6 +107,7 @@ impl AppState {
         .unwrap();
 
         self.terminals.insert(terminal_id, terminal_backend);
+        self.korean_input_states.insert(terminal_id, KoreanInputState::new());
         terminal_id
     }
 }
