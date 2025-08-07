@@ -22,6 +22,17 @@ impl App {
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Consume Tab key events before egui can process them for UI focus
+        // This ensures Tab keys go to terminals, not UI navigation
+        if self.state.focused_terminal.is_some() {
+            ctx.input(|i| {
+                // This consumes the Tab key event, preventing default UI focus behavior
+                if i.key_pressed(egui::Key::Tab) {
+                    // Event is consumed, no action needed here as it's handled in InputHandler
+                }
+            });
+        }
+        
         // Handle PTY events
         while let Ok((terminal_id, event)) = self.state.pty_proxy_receiver.try_recv() {
             match event {

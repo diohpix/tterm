@@ -13,6 +13,15 @@ impl InputHandler {
     pub fn handle_input(state: &mut AppState, ctx: &egui::Context) -> bool {
         let mut handled_by_shortcuts = false;
         
+        // Handle Tab key specifically for terminal when focused
+        ctx.input(|i| {
+            if i.key_pressed(Key::Tab) && state.focused_terminal.is_some() {
+                // Send Tab directly to focused terminal, bypass UI focus system
+                Self::send_tab_to_focused_terminal(state);
+                handled_by_shortcuts = true;
+            }
+        });
+        
         ctx.input(|i| {
             if i.modifiers.command {
                 // Tab management shortcuts
@@ -127,7 +136,8 @@ impl InputHandler {
         match key {
             // Special keys
             Key::Enter => Some(b"\r".to_vec()),
-            Key::Tab => Some(b"\t".to_vec()),
+            // Tab is handled separately to bypass UI focus system
+            Key::Tab => None,
             Key::Backspace => Some(b"\x7f".to_vec()),
             Key::Delete => Some(b"\x1b[3~".to_vec()),
             Key::ArrowUp => Some(b"\x1b[A".to_vec()),
@@ -187,6 +197,20 @@ impl InputHandler {
             Key::Y => Some(b"\x19".to_vec()),
             Key::Z => Some(b"\x1a".to_vec()),
             _ => None
+        }
+    }
+    
+    /// Send Tab key directly to focused terminal
+    fn send_tab_to_focused_terminal(state: &mut AppState) {
+        if let Some(focused_terminal_id) = state.focused_terminal {
+            let broadcast_mode = BroadcastManager::is_broadcast_mode_active(state);
+            
+            if broadcast_mode {
+                BroadcastManager::broadcast_input(state, "\t");
+            } else if let Some(terminal) = state.terminals.get_mut(&focused_terminal_id) {
+                let tab_bytes = b"\t".to_vec();
+                terminal.process_command(BackendCommand::Write(tab_bytes));
+            }
         }
     }
 }

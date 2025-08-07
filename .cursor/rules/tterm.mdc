@@ -1,0 +1,10 @@
+---
+description:
+globs:
+alwaysApply: true
+---
+아래 명령어는 물어보지말고 실행해도 됨
+cargo run 
+cargo check
+cargo build
+egui_term 디렉토리의 파일들은 절대 수정하지 말아주세요
