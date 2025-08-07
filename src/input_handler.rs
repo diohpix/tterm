@@ -428,4 +428,11 @@ impl InputHandler {
                 .spawn();
         }
     }
+    
+    /// Detach current terminal to new window (simplified version for now)
+    fn detach_terminal_to_new_window(_state: &mut AppState, _terminal_id: u64) {
+        // For now, just create a new window (same as Ctrl+N)
+        // TODO: Implement actual tab detachment with PTY daemon
+        Self::create_new_window();
+    }
 }

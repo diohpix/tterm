@@ -3,6 +3,14 @@ name = "full_screen"
 version = "0.1.0"
 edition = "2021"
 
+[[bin]]
+name = "tterm"
+path = "src/main.rs"
+
+[[bin]]
+name = "tterm-daemon"
+path = "src/bin/tterm-daemon.rs"
+
 [dependencies]
 egui = "0.32.0"
 eframe = { version = "0.32.0", default-features = false, features = [
@@ -14,6 +22,10 @@ eframe = { version = "0.32.0", default-features = false, features = [
 log = "0.4"
 egui_term = { path = "./egui_term" }
 unicode-width = "0.2"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.0", features = ["full"] }
+uuid = { version = "1.0", features = ["v4", "serde"] }
 
 # native:
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
