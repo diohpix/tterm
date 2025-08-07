@@ -3,10 +3,17 @@ use egui_term::{PtyEvent, TerminalBackend, TerminalView};
 use std::sync::mpsc::{Receiver, Sender};
 use std::collections::{HashMap, HashSet};
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub enum ViewMode {
     Single,
-    Grid { rows: usize, cols: usize },
+    Grid { 
+        rows: usize, 
+        cols: usize,
+        // Custom cell sizes: col_ratios[i] = width ratio for column i
+        // row_ratios[i] = height ratio for row i
+        col_ratios: Vec<f32>,
+        row_ratios: Vec<f32>,
+    },
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -256,7 +263,19 @@ impl App {
         }
     }
     
-    fn render_panel_content(&mut self, ui: &mut Ui, content: &PanelContent, available_rect: Rect) {
+    fn render_panel_content_clipped(&mut self, ui: &mut Ui, content: &mut PanelContent, available_rect: Rect) {
+        // Use ui.allocate_ui_with_layout for proper clipping
+        ui.allocate_ui_with_layout(
+            available_rect.size(),
+            egui::Layout::left_to_right(egui::Align::TOP),
+            |ui| {
+                ui.set_clip_rect(available_rect);
+                self.render_panel_content(ui, content, available_rect);
+            },
+        );
+    }
+    
+    fn render_panel_content(&mut self, ui: &mut Ui, content: &mut PanelContent, available_rect: Rect) {
         match content {
             PanelContent::Terminal(terminal_id) => {
                 if let Some(terminal_backend) = self.terminals.get_mut(terminal_id) {
@@ -300,48 +319,108 @@ impl App {
             PanelContent::Split { direction, first, second, ratio, .. } => {
                 match direction {
                     SplitDirection::Horizontal => {
-                        let split_y = available_rect.min.y + available_rect.height() * ratio;
+                        let split_y = available_rect.min.y + available_rect.height() * *ratio;
                         
                         let first_rect = Rect::from_min_max(
                             available_rect.min,
-                            egui::pos2(available_rect.max.x, split_y - 1.0),
+                            egui::pos2(available_rect.max.x, split_y - 2.0),
                         );
                         
                         let second_rect = Rect::from_min_max(
-                            egui::pos2(available_rect.min.x, split_y + 1.0),
+                            egui::pos2(available_rect.min.x, split_y + 2.0),
                             available_rect.max,
+                        );
+                        
+                        // Create separator area for dragging
+                        let separator_rect = Rect::from_min_max(
+                            egui::pos2(available_rect.min.x, split_y - 2.0),
+                            egui::pos2(available_rect.max.x, split_y + 2.0),
                         );
                         
                         self.render_panel_content(ui, first, first_rect);
                         
-                        // Draw separator
-                        ui.painter().line_segment(
-                            [egui::pos2(available_rect.min.x, split_y), egui::pos2(available_rect.max.x, split_y)],
-                            egui::Stroke::new(1.0, egui::Color32::GRAY),
+                        // Handle separator dragging
+                        let separator_response = ui.allocate_rect(separator_rect, egui::Sense::drag());
+                        if separator_response.dragged() {
+                            if let Some(pointer_pos) = ui.input(|i| i.pointer.interact_pos()) {
+                                let new_split_y = pointer_pos.y;
+                                let new_ratio = ((new_split_y - available_rect.min.y) / available_rect.height()).clamp(0.1, 0.9);
+                                *ratio = new_ratio;
+                            }
+                        }
+                        
+                        // Draw separator with hover effect and proper clipping
+                        let separator_color = if separator_response.hovered() {
+                            egui::Color32::from_rgb(100, 150, 255) // Blue when hovered
+                        } else {
+                            egui::Color32::GRAY
+                        };
+                        
+                        // Ensure separator is clipped to the available rect
+                        let clipped_separator_rect = separator_rect.intersect(available_rect);
+                        ui.painter().rect_filled(
+                            clipped_separator_rect,
+                            0.0,
+                            separator_color,
                         );
+                        
+                        // Change cursor when hovering
+                        if separator_response.hovered() {
+                            ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
+                        }
                         
                         self.render_panel_content(ui, second, second_rect);
                     }
                     SplitDirection::Vertical => {
-                        let split_x = available_rect.min.x + available_rect.width() * ratio;
+                        let split_x = available_rect.min.x + available_rect.width() * *ratio;
                         
                         let first_rect = Rect::from_min_max(
                             available_rect.min,
-                            egui::pos2(split_x - 1.0, available_rect.max.y),
+                            egui::pos2(split_x - 2.0, available_rect.max.y),
                         );
                         
                         let second_rect = Rect::from_min_max(
-                            egui::pos2(split_x + 1.0, available_rect.min.y),
+                            egui::pos2(split_x + 2.0, available_rect.min.y),
                             available_rect.max,
+                        );
+                        
+                        // Create separator area for dragging
+                        let separator_rect = Rect::from_min_max(
+                            egui::pos2(split_x - 2.0, available_rect.min.y),
+                            egui::pos2(split_x + 2.0, available_rect.max.y),
                         );
                         
                         self.render_panel_content(ui, first, first_rect);
                         
-                        // Draw separator
-                        ui.painter().line_segment(
-                            [egui::pos2(split_x, available_rect.min.y), egui::pos2(split_x, available_rect.max.y)],
-                            egui::Stroke::new(1.0, egui::Color32::GRAY),
+                        // Handle separator dragging
+                        let separator_response = ui.allocate_rect(separator_rect, egui::Sense::drag());
+                        if separator_response.dragged() {
+                            if let Some(pointer_pos) = ui.input(|i| i.pointer.interact_pos()) {
+                                let new_split_x = pointer_pos.x;
+                                let new_ratio = ((new_split_x - available_rect.min.x) / available_rect.width()).clamp(0.1, 0.9);
+                                *ratio = new_ratio;
+                            }
+                        }
+                        
+                        // Draw separator with hover effect and proper clipping
+                        let separator_color = if separator_response.hovered() {
+                            egui::Color32::from_rgb(100, 150, 255) // Blue when hovered
+                        } else {
+                            egui::Color32::GRAY
+                        };
+                        
+                        // Ensure separator is clipped to the available rect
+                        let clipped_separator_rect = separator_rect.intersect(available_rect);
+                        ui.painter().rect_filled(
+                            clipped_separator_rect,
+                            0.0,
+                            separator_color,
                         );
+                        
+                        // Change cursor when hovering
+                        if separator_response.hovered() {
+                            ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+                        }
                         
                         self.render_panel_content(ui, second, second_rect);
                     }
@@ -378,7 +457,10 @@ impl App {
                 self.view_mode = ViewMode::Single;
             } else {
                 let (rows, cols) = self.calculate_optimal_grid_size(tab_count);
-                self.view_mode = ViewMode::Grid { rows, cols };
+                // Create uniform ratios for new grid size
+                let col_ratios = vec![1.0 / cols as f32; cols];
+                let row_ratios = vec![1.0 / rows as f32; rows];
+                self.view_mode = ViewMode::Grid { rows, cols, col_ratios, row_ratios };
             }
         }
     }
@@ -392,44 +474,66 @@ impl App {
                 }
                 
                 let (rows, cols) = self.calculate_optimal_grid_size(self.tabs.len());
-                ViewMode::Grid { rows, cols }
+                let col_ratios = vec![1.0 / cols as f32; cols];
+                let row_ratios = vec![1.0 / rows as f32; rows];
+                ViewMode::Grid { rows, cols, col_ratios, row_ratios }
             }
             ViewMode::Grid { .. } => ViewMode::Single,
         };
     }
     
     fn render_grid_view(&mut self, ui: &mut Ui, available_rect: Rect) {
-        if let ViewMode::Grid { rows, cols } = self.view_mode {
+        // Extract grid parameters to avoid borrow issues
+        let grid_info = match &self.view_mode {
+            ViewMode::Grid { rows, cols, col_ratios, row_ratios } => Some((*rows, *cols, col_ratios.clone(), row_ratios.clone())),
+            _ => None,
+        };
+        
+        if let Some((rows, cols, mut col_ratios, mut row_ratios)) = grid_info {
             let tab_count = self.tabs.len();
-            let cell_width = available_rect.width() / cols as f32;
-            let cell_height = available_rect.height() / rows as f32;
+            
+            // Calculate cumulative positions for grid cells
+            let mut col_positions = vec![0.0];
+            let mut current_x = 0.0;
+            for &ratio in col_ratios.iter() {
+                current_x += ratio * available_rect.width();
+                col_positions.push(current_x);
+            }
+            
+            let mut row_positions = vec![0.0];
+            let mut current_y = 0.0;
+            for &ratio in row_ratios.iter() {
+                current_y += ratio * available_rect.height();
+                row_positions.push(current_y);
+            }
             
             // Get all tabs for grid view (maintain split layouts per tab)
             let mut tab_ids: Vec<_> = self.tab_order.clone();
             tab_ids.truncate(rows * cols); // Don't render more than grid capacity
             
+            // Render grid cells
             for (idx, &tab_id) in tab_ids.iter().enumerate() {
                 let row = idx / cols;
                 let col = idx % cols;
+                
+                // Calculate cell position using ratios
+                let cell_x = available_rect.min.x + col_positions[col];
+                let cell_y = available_rect.min.y + row_positions[row];
+                let cell_width = col_positions[col + 1] - col_positions[col];
+                let cell_height = row_positions[row + 1] - row_positions[row];
                 
                 // Special handling for 3 tabs in 2x2 grid: 3rd tab spans full width
                 let cell_rect = if tab_count == 3 && rows == 2 && cols == 2 && idx == 2 {
                     // Third tab spans full width on bottom row
                     Rect::from_min_size(
-                        egui::pos2(
-                            available_rect.min.x,
-                            available_rect.min.y + cell_height,
-                        ),
-                        egui::vec2(available_rect.width() - 2.0, cell_height - 2.0),
+                        egui::pos2(available_rect.min.x, available_rect.min.y + row_positions[1]),
+                        egui::vec2(available_rect.width() - 4.0, row_positions[2] - row_positions[1] - 4.0),
                     )
                 } else {
-                    // Normal grid cell
+                    // Normal grid cell with separator gaps
                     Rect::from_min_size(
-                        egui::pos2(
-                            available_rect.min.x + col as f32 * cell_width,
-                            available_rect.min.y + row as f32 * cell_height,
-                        ),
-                        egui::vec2(cell_width - 2.0, cell_height - 2.0), // Small gap between cells
+                        egui::pos2(cell_x + 2.0, cell_y + 2.0),
+                        egui::vec2(cell_width - 4.0, cell_height - 4.0),
                     )
                 };
                 
@@ -489,10 +593,135 @@ impl App {
                         );
                         
                         // Render the tab's layout (including splits) in the content area
-                        self.render_panel_content(ui, &layout, content_rect);
+                        // For grid view, we use cloned layout and update if changed
+                        let mut layout_copy = layout.clone();
+                        
+                        // Render with proper clipping
+                        self.render_panel_content_clipped(ui, &mut layout_copy, content_rect);
+                        
+                        // Update the layout if it was modified (for resize)
+                        self.tab_layouts.insert(tab_id, layout_copy);
                     }
                 }
             }
+            
+            // Render grid separators (column separators)
+            for col in 0..cols-1 {
+                let sep_x = available_rect.min.x + col_positions[col + 1];
+                
+                // Special handling for 3 tabs: don't draw column separator in bottom row where tab spans full width
+                let separator_rect = if tab_count == 3 && cols == 2 && rows == 2 {
+                    // For 3 tabs in 2x2, only draw separator in top row
+                    let bottom_row_y = available_rect.min.y + row_positions[1];
+                    Rect::from_min_max(
+                        egui::pos2(sep_x - 2.0, available_rect.min.y),
+                        egui::pos2(sep_x + 2.0, bottom_row_y),
+                    )
+                } else {
+                    Rect::from_min_max(
+                        egui::pos2(sep_x - 2.0, available_rect.min.y),
+                        egui::pos2(sep_x + 2.0, available_rect.max.y),
+                    )
+                };
+                
+                let separator_response = ui.allocate_rect(separator_rect, egui::Sense::drag());
+                if separator_response.dragged() {
+                    if let Some(pointer_pos) = ui.input(|i| i.pointer.interact_pos()) {
+                        let new_x = pointer_pos.x - available_rect.min.x;
+                        let total_width = available_rect.width();
+                        
+                        // Calculate new ratios
+                        let min_ratio = 0.05; // Minimum 5% width
+                        let left_ratio = (new_x / total_width).clamp(min_ratio, 1.0 - min_ratio * (cols - col - 1) as f32);
+                        
+                        // Adjust ratios
+                        let old_left_total: f32 = col_ratios.iter().take(col + 1).sum();
+                        let old_right_total: f32 = col_ratios.iter().skip(col + 1).sum();
+                        
+                        if old_left_total > 0.0 && old_right_total > 0.0 {
+                            let new_right_total = 1.0 - left_ratio;
+                            
+                            // Scale left ratios
+                            for i in 0..=col {
+                                col_ratios[i] = col_ratios[i] * left_ratio / old_left_total;
+                            }
+                            
+                            // Scale right ratios
+                            for i in (col + 1)..cols {
+                                col_ratios[i] = col_ratios[i] * new_right_total / old_right_total;
+                            }
+                        }
+                    }
+                }
+                
+                // Draw separator with hover effect
+                let separator_color = if separator_response.hovered() {
+                    egui::Color32::from_rgb(100, 150, 255)
+                } else {
+                    egui::Color32::DARK_GRAY
+                };
+                
+                ui.painter().rect_filled(separator_rect, 0.0, separator_color);
+                
+                if separator_response.hovered() {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+                }
+            }
+            
+            // Render grid separators (row separators)
+            for row in 0..rows-1 {
+                let sep_y = available_rect.min.y + row_positions[row + 1];
+                let separator_rect = Rect::from_min_max(
+                    egui::pos2(available_rect.min.x, sep_y - 2.0),
+                    egui::pos2(available_rect.max.x, sep_y + 2.0),
+                );
+                
+                let separator_response = ui.allocate_rect(separator_rect, egui::Sense::drag());
+                if separator_response.dragged() {
+                    if let Some(pointer_pos) = ui.input(|i| i.pointer.interact_pos()) {
+                        let new_y = pointer_pos.y - available_rect.min.y;
+                        let total_height = available_rect.height();
+                        
+                        // Calculate new ratios
+                        let min_ratio = 0.05; // Minimum 5% height
+                        let top_ratio = (new_y / total_height).clamp(min_ratio, 1.0 - min_ratio * (rows - row - 1) as f32);
+                        
+                        // Adjust ratios
+                        let old_top_total: f32 = row_ratios.iter().take(row + 1).sum();
+                        let old_bottom_total: f32 = row_ratios.iter().skip(row + 1).sum();
+                        
+                        if old_top_total > 0.0 && old_bottom_total > 0.0 {
+                            let new_bottom_total = 1.0 - top_ratio;
+                            
+                            // Scale top ratios
+                            for i in 0..=row {
+                                row_ratios[i] = row_ratios[i] * top_ratio / old_top_total;
+                            }
+                            
+                            // Scale bottom ratios
+                            for i in (row + 1)..rows {
+                                row_ratios[i] = row_ratios[i] * new_bottom_total / old_bottom_total;
+                            }
+                        }
+                    }
+                }
+                
+                // Draw separator with hover effect
+                let separator_color = if separator_response.hovered() {
+                    egui::Color32::from_rgb(100, 150, 255)
+                } else {
+                    egui::Color32::DARK_GRAY
+                };
+                
+                ui.painter().rect_filled(separator_rect, 0.0, separator_color);
+                
+                if separator_response.hovered() {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
+                }
+            }
+            
+            // Update the view mode with modified ratios
+            self.view_mode = ViewMode::Grid { rows, cols, col_ratios, row_ratios };
         }
     }
     
@@ -563,9 +792,9 @@ impl App {
             ui.separator();
             
             // View mode status
-            match self.view_mode {
+            match &self.view_mode {
                 ViewMode::Single => ui.label("Single view"),
-                ViewMode::Grid { rows, cols } => ui.label(format!("Grid {}x{}", rows, cols)),
+                ViewMode::Grid { rows, cols, .. } => ui.label(format!("Grid {}x{}", rows, cols)),
             };
             
             ui.separator();
@@ -833,8 +1062,12 @@ impl eframe::App for App {
             
             match self.view_mode {
                 ViewMode::Single => {
-                    if let Some(layout) = self.tab_layouts.get(&self.active_tab_id).cloned() {
-                        self.render_panel_content(ui, &layout, available_rect);
+                    let active_tab_id = self.active_tab_id;
+                    if let Some(layout) = self.tab_layouts.get(&active_tab_id).cloned() {
+                        let mut layout_copy = layout;
+                        self.render_panel_content(ui, &mut layout_copy, available_rect);
+                        // Update the layout if it was modified (for resize)
+                        self.tab_layouts.insert(active_tab_id, layout_copy);
                     }
                 }
                 ViewMode::Grid { .. } => {
