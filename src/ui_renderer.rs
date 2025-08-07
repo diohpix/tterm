@@ -114,6 +114,12 @@ impl UiRenderer {
                 egui::epaint::StrokeKind::Outside,
             );
             
+            // Check if this terminal is composing Korean text to potentially adjust cursor rendering
+            let _is_composing_korean = state.korean_input_states
+                .get(&terminal_id)
+                .map(|korean_state| korean_state.is_composing)
+                .unwrap_or(false);
+            
             let terminal = TerminalView::new(ui, terminal_backend)
                 .set_focus(false) // Disable focus on TerminalView to prevent mouse dependency
                 .set_size(Vec2::new(available_rect.width(), available_rect.height()));
@@ -503,32 +509,53 @@ impl UiRenderer {
                         let content = terminal.last_content();
                         let terminal_size = &content.terminal_size;
                         let font_size = terminal_size.cell_height as f32;
+                        let single_char_width = terminal_size.cell_width as f32;
+                        let char_height = terminal_size.cell_height as f32;
+                        
+                        // Double-wide cursor for Korean composition
+                        let double_char_width = single_char_width * 2.0;
                         
                         // Use the monospace font family (which includes D2Coding from app.rs configuration)
                         let font_id = FontId::new(font_size, egui::FontFamily::Monospace);
                         
-                        // Use a natural terminal text color (light gray)
-                        // This matches most terminal default foreground colors
-                        let cursor_fg_color = egui::Color32::from_rgb(220, 220, 220);
+                        // Define colors for better visibility
+                        let cursor_bg_color = egui::Color32::from_rgb(255, 255, 255); // White background for cursor
+                        let cursor_fg_color = egui::Color32::from_rgb(0, 0, 0); // Black text on white background
                         
-                        // Draw the composing character with terminal's text color
+                        // Draw double-wide cursor background
+                        ui.painter().rect_filled(
+                            Rect::from_min_size(
+                                cursor_pos,
+                                Vec2::new(double_char_width, char_height),
+                            ),
+                            egui::Rounding::ZERO,
+                            cursor_bg_color,
+                        );
+                        
+                        // Draw the composing character with inverted colors (black text on white background)
+                        // Center the text in the double-wide cursor area
+                        let text_pos = Pos2::new(
+                            cursor_pos.x + double_char_width / 2.0,
+                            cursor_pos.y,
+                        );
+                        
                         ui.painter().text(
-                            cursor_pos,
-                            Align2::LEFT_TOP,
+                            text_pos,
+                            Align2::CENTER_TOP,
                             composing_char.to_string(),
                             font_id,
                             cursor_fg_color,
                         );
                         
-                        // Optional: Draw an underline to indicate composition status
-                        let char_width = terminal_size.cell_width as f32;
-                        let char_height = terminal_size.cell_height as f32;
-                        ui.painter().line_segment(
-                            [
-                                Pos2::new(cursor_pos.x, cursor_pos.y + char_height),
-                                Pos2::new(cursor_pos.x + char_width, cursor_pos.y + char_height),
-                            ],
-                            egui::Stroke::new(1.0, cursor_fg_color),
+                        // Draw a subtle border around the cursor for better definition
+                        ui.painter().rect_stroke(
+                            Rect::from_min_size(
+                                cursor_pos,
+                                Vec2::new(double_char_width, char_height),
+                            ),
+                            egui::Rounding::ZERO,
+                            egui::Stroke::new(1.0, egui::Color32::from_rgb(128, 128, 128)),
+                            egui::epaint::StrokeKind::Outside,
                         );
                     }
                 }
