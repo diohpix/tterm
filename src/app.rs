@@ -11,12 +11,39 @@ pub struct App {
 
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        // Load and configure Korean fonts
+        Self::configure_korean_fonts(&cc.egui_ctx);
+        
         let mut state = AppState::new(cc);
         
         // Create the first tab
         TabManager::create_new_tab(&mut state);
         
         Self { state }
+    }
+    
+    fn configure_korean_fonts(ctx: &egui::Context) {
+        let mut fonts = egui::FontDefinitions::default();
+        
+        // Load D2Coding font data
+        let d2coding_font_data = include_bytes!("../fonts/D2Coding.ttf");
+        
+        // Insert D2Coding font
+        fonts.font_data.insert(
+            "D2Coding".to_owned(),
+            egui::FontData::from_static(d2coding_font_data).into(),
+        );
+        
+        // Insert D2Coding at the front of monospace fonts
+        fonts.families.get_mut(&egui::FontFamily::Monospace).unwrap()
+            .insert(0, "D2Coding".to_owned());
+        
+        // Also add to proportional for UI text that might contain Korean
+        fonts.families.get_mut(&egui::FontFamily::Proportional).unwrap()
+            .insert(0, "D2Coding".to_owned());
+        
+        // Apply font configuration
+        ctx.set_fonts(fonts);
     }
 }
 

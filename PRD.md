@@ -454,3 +454,21 @@ TTerminal은 현대적인 개발 환경에서 요구되는 고급 터미널 기�
     - **브로드캐스트 지원**: 브로드캐스트 모드에서도 동일하게 Tab 키 전파
     - **중복 처리 방지**: `key_to_bytes` 함수에서 Tab 키 처리를 제거하여 이중 처리 방지
     - **핵심 개선**: 터미널에서 Tab 키로 자동완성, 파일명 완성 등 본래 기능 사용 가능
+- ✅ **Fixed**: 터미널에서 한글파일 목록이 깨지는 문제 해결 - UTF-8 locale 설정 개선
+  - 구현된 기능:
+    - `BackendSettings`에 환경 변수 맵 추가하여 locale 설정 지원
+    - 기본 환경 변수로 `LANG`, `LC_ALL`, `LC_CTYPE`을 `en_US.UTF-8`로 설정
+    - alacritty_terminal의 `tty::Options`에 환경 변수를 전달하여 PTY 프로세스에 적용
+    - 한글 파일명을 포함한 모든 UTF-8 문자가 터미널에서 올바르게 표시됨
+    - **핵심 개선**: 시스템 locale과 관계없이 터미널 내에서 일관된 UTF-8 지원 보장
+- ✅ **Fixed**: 한글 문자가 네모 박스(□)로 표시되는 폰트 문제 해결 + panic 문제 해결
+  - 구현된 기능:
+    - **D2Coding 폰트 직접 임베드**: 4MB D2Coding.ttf 파일을 애플리케이션에 포함
+    - egui 렌더링 백엔드를 wgpu에서 glow로 변경하여 macOS 호환성 개선
+    - `include_bytes!` 매크로를 사용한 폰트 데이터 직접 로딩
+    - monospace 및 proportional 폰트 패밀리에 D2Coding 우선 설정
+    - **핵심 개선**: 
+      - 시스템 환경과 완전 독립적인 한글 폰트 지원
+      - macOS winit draw_rect panic 문제 해결
+      - 애플리케이션 안정성 및 한글 표시 모두 보장
+
