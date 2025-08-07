@@ -1,13 +1,17 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 use tokio::net::{UnixListener, UnixStream};
-use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncReadExt, AsyncWriteExt, AsyncBufReadExt, BufReader};
 use tokio::time::{timeout, Duration};
+use tokio::sync::Mutex;
 use uuid::Uuid;
 use log::{info, error, debug, warn};
 
 // Import from main crate
 use full_screen::ipc::{ClientMessage, DaemonMessage, SOCKET_PATH};
 use full_screen::session::SessionManager;
+
+type SharedDaemon = Arc<Mutex<PtyDaemon>>;
 
 struct PtyDaemon {
     session_manager: SessionManager,
@@ -119,6 +123,8 @@ impl PtyDaemon {
             }
         }
     }
+    
+
 
     async fn run(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         // Remove existing socket file if it exists
