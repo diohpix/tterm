@@ -2,7 +2,7 @@ use crate::types::{AppState, ViewMode, PanelContent, SplitDirection};
 use crate::tab_manager::TabManager;
 use crate::grid_manager::GridManager;
 use crate::broadcast_manager::BroadcastManager;
-use egui::{Ui, Rect, Vec2};
+use egui::{Ui, Rect, Vec2, Pos2, FontId, Align2};
 use egui_term::TerminalView;
 
 pub struct UiRenderer;
@@ -122,6 +122,9 @@ impl UiRenderer {
             ui.scope_builder(egui::UiBuilder::new().max_rect(available_rect), |ui| {
                 ui.add(terminal)
             });
+            
+            // Render Korean composition overlay if composing
+            Self::render_korean_composition_overlay(state, ui, terminal_id, available_rect);
             
             // Check if the terminal area was clicked
             if ui.input(|i| i.pointer.any_click()) {
@@ -475,5 +478,81 @@ impl UiRenderer {
                 Self::render_panel_content(state, ui, content, available_rect);
             },
         );
+    }
+    
+    /// Render Korean composition overlay on terminal
+    fn render_korean_composition_overlay(
+        state: &AppState,
+        ui: &mut Ui,
+        terminal_id: u64,
+        terminal_rect: Rect,
+    ) {
+        // Check if this terminal has active Korean composition
+        if let Some(korean_state) = state.korean_input_states.get(&terminal_id) {
+            if korean_state.is_composing {
+                if let Some(composing_char) = korean_state.get_current_char() {
+                    // Get terminal backend to access cursor position
+                    if let Some(terminal) = state.terminals.get(&terminal_id) {
+                        // Calculate cursor position in egui coordinates
+                        let cursor_pos = Self::terminal_cursor_to_screen_pos(
+                            terminal,
+                            terminal_rect,
+                        );
+                        
+                        // Get the actual terminal font settings
+                        let content = terminal.last_content();
+                        let terminal_size = &content.terminal_size;
+                        let font_size = terminal_size.cell_height as f32;
+                        
+                        // Use the monospace font family (which includes D2Coding from app.rs configuration)
+                        let font_id = FontId::new(font_size, egui::FontFamily::Monospace);
+                        
+                        // Use a natural terminal text color (light gray)
+                        // This matches most terminal default foreground colors
+                        let cursor_fg_color = egui::Color32::from_rgb(220, 220, 220);
+                        
+                        // Draw the composing character with terminal's text color
+                        ui.painter().text(
+                            cursor_pos,
+                            Align2::LEFT_TOP,
+                            composing_char.to_string(),
+                            font_id,
+                            cursor_fg_color,
+                        );
+                        
+                        // Optional: Draw an underline to indicate composition status
+                        let char_width = terminal_size.cell_width as f32;
+                        let char_height = terminal_size.cell_height as f32;
+                        ui.painter().line_segment(
+                            [
+                                Pos2::new(cursor_pos.x, cursor_pos.y + char_height),
+                                Pos2::new(cursor_pos.x + char_width, cursor_pos.y + char_height),
+                            ],
+                            egui::Stroke::new(1.0, cursor_fg_color),
+                        );
+                    }
+                }
+            }
+        }
+    }
+    
+    /// Convert terminal cursor position to egui screen coordinates
+    fn terminal_cursor_to_screen_pos(
+        terminal: &egui_term::TerminalBackend,
+        terminal_rect: Rect,
+    ) -> Pos2 {
+        let content = terminal.last_content();
+        let cursor_point = content.grid.cursor.point;
+        let terminal_size = &content.terminal_size;
+        
+        // Calculate character cell size
+        let cell_width = terminal_size.cell_width;
+        let cell_height = terminal_size.cell_height;
+        
+        // Convert terminal grid coordinates to screen coordinates
+        let x = terminal_rect.min.x + (cursor_point.column.0 as f32 * cell_width as f32);
+        let y = terminal_rect.min.y + (cursor_point.line.0 as f32 * cell_height as f32);
+        
+        Pos2::new(x, y)
     }
 }

@@ -135,38 +135,11 @@ impl InputHandler {
                             }
                             Key::Backspace => {
                                 // Handle backspace for Korean composition
-                                let mut korean_handled = false;
-                                let mut updated_char: Option<char> = None;
-                                
                                 if let Some(korean_state) = state.korean_input_states.get_mut(&focused_terminal_id) {
                                     if korean_state.is_composing {
-                                        korean_handled = true;
-                                        
-                                        // Handle the Korean backspace
-                                        if korean_state.handle_backspace() {
-                                            // Still composing - get updated character
-                                            updated_char = korean_state.get_current_char();
-                                        }
+                                        korean_state.handle_backspace();
+                                        continue; // Don't send backspace to terminal, just update overlay
                                     }
-                                }
-                                
-                                if korean_handled {
-                                    // Send backspace to remove current composing character
-                                    if broadcast_mode {
-                                        BroadcastManager::broadcast_input(state, "\u{0008}"); // Backspace
-                                    } else if let Some(terminal) = state.terminals.get_mut(&focused_terminal_id) {
-                                        terminal.process_command(BackendCommand::Write(b"\x08".to_vec()));
-                                    }
-                                    
-                                    // If still composing, show updated character
-                                    if let Some(updated) = updated_char {
-                                        if broadcast_mode {
-                                            BroadcastManager::broadcast_input(state, &updated.to_string());
-                                        } else if let Some(terminal) = state.terminals.get_mut(&focused_terminal_id) {
-                                            terminal.process_command(BackendCommand::Write(updated.to_string().as_bytes().to_vec()));
-                                        }
-                                    }
-                                    continue; // Don't send additional backspace
                                 }
                                 
                                 // If not handled by Korean IME, fall through to normal key processing
@@ -319,39 +292,15 @@ impl InputHandler {
         for ch in input_text.chars() {
             // Check if this is a Korean jamo (consonant or vowel)
             if is_consonant(ch) || is_vowel(ch) {
-                // Store previous composing character for comparison
-                let prev_char = korean_state.get_current_char();
-                let was_composing = korean_state.is_composing;
-                
                 // Process the Korean character
                 let completed_chars = Self::process_korean_char(korean_state, ch);
                 
-                // Handle composition preview in terminal
-                if korean_state.is_composing {
-                    let current_char = korean_state.get_current_char();
-                    
-                    // If we had a previous composing character, remove it first
-                    if was_composing && prev_char.is_some() {
-                        result.push('\u{0008}'); // Backspace
-                    }
-                    
-                    // Add any completed characters first
-                    result.push_str(&completed_chars);
-                    
-                    // Add current composing character for preview
-                    if let Some(composing) = current_char {
-                        result.push(composing);
-                    }
-                } else {
-                    // Not composing, just add completed characters
-                    result.push_str(&completed_chars);
-                }
+                // Only send completed characters to terminal
+                // Composing characters will be shown via overlay
+                result.push_str(&completed_chars);
             } else {
                 // Non-Korean character - commit any pending composition and add the character
                 if korean_state.is_composing {
-                    // Remove the temporary composing character first
-                    result.push('\u{0008}'); // Backspace
-                    
                     if let Some(composed) = korean_state.get_current_char() {
                         result.push(composed);
                     }
@@ -369,10 +318,7 @@ impl InputHandler {
         if let Some(korean_state) = state.korean_input_states.get_mut(&terminal_id) {
             if korean_state.is_composing {
                 if let Some(terminal) = state.terminals.get_mut(&terminal_id) {
-                    // Remove the temporary composing character first
-                    terminal.process_command(BackendCommand::Write(b"\x08".to_vec()));
-                    
-                    // Then send the finalized character
+                    // Send the finalized character to terminal
                     if let Some(completed) = korean_state.get_current_char() {
                         terminal.process_command(BackendCommand::Write(completed.to_string().as_bytes().to_vec()));
                     }
