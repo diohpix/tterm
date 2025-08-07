@@ -3,8 +3,9 @@ use crate::tab_manager::TabManager;
 use crate::grid_manager::GridManager;
 use crate::broadcast_manager::BroadcastManager;
 use crate::ime::cjk;
-use egui::{Ui, Rect, Vec2, Pos2, FontId, Align2};
+use egui::{Ui, Rect, Vec2, Pos2, FontId, Align2, Color32};
 use egui_term::TerminalView;
+use uuid::Uuid;
 
 pub struct UiRenderer;
 
@@ -53,9 +54,37 @@ impl UiRenderer {
         });
     }
     
+    /// Render daemon connection and session status
+    fn render_daemon_status(state: &AppState, ui: &mut Ui) {
+        // Daemon connection indicator
+        if state.daemon_client.is_some() {
+            ui.colored_label(Color32::from_rgb(100, 255, 100), "🔗 Daemon");
+        } else {
+            ui.colored_label(Color32::from_rgb(150, 150, 150), "⚫ No Daemon");
+        }
+        
+        // Show daemon session count
+        if !state.daemon_sessions.is_empty() {
+            ui.label(format!("({} sessions)", state.daemon_sessions.len()));
+            
+            // Show detachable terminals indicator
+            let detachable_count = state.daemon_sessions.len();
+            if detachable_count > 0 {
+                ui.colored_label(Color32::from_rgb(100, 150, 255), 
+                    format!("📌 {}", detachable_count))
+                    .on_hover_text("Terminals that can be detached with Cmd+O");
+            }
+        }
+    }
+    
     /// Render the status bar
     pub fn render_status_bar(state: &AppState, ui: &mut Ui) {
         ui.horizontal(|ui| {
+            // Daemon connection status
+            Self::render_daemon_status(state, ui);
+            
+            ui.separator();
+            
             // Broadcast status
             if BroadcastManager::is_broadcast_mode_active(state) {
                 ui.colored_label(egui::Color32::from_rgb(255, 100, 100), "☀ BROADCAST");

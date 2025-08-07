@@ -102,9 +102,21 @@ impl PtySession {
                     let master = master_for_input.clone();
                     move || {
                         if let Ok(mut pty_master) = master.lock() {
-                            let mut writer = pty_master.take_writer().ok()?;
-                            writer.write_all(&data).ok()?;
-                            writer.flush().ok()
+                            match pty_master.take_writer() {
+                                Ok(mut writer) => {
+                                    let write_result = writer.write_all(&data);
+                                    let flush_result = writer.flush();
+                                    
+                                    // Try to restore the writer (this might not work with portable-pty)
+                                    // For now, we'll create a new writer each time
+                                    if write_result.is_ok() && flush_result.is_ok() {
+                                        Some(())
+                                    } else {
+                                        None
+                                    }
+                                }
+                                Err(_) => None,
+                            }
                         } else {
                             None
                         }
@@ -128,13 +140,16 @@ impl PtySession {
                 let result = tokio::task::spawn_blocking({
                     let master = master_for_output.clone();
                     move || {
-                        if let Ok(mut pty_master) = master.lock() {
-                            let mut reader = pty_master.try_clone_reader().ok()?;
-                            let mut buffer = [0u8; 4096];
-                            match reader.read(&mut buffer) {
-                                Ok(0) => Some(Vec::new()), // EOF
-                                Ok(n) => Some(buffer[..n].to_vec()),
-                                Err(_) => None,
+                        if let Ok(pty_master) = master.lock() {
+                            if let Ok(mut reader) = pty_master.try_clone_reader() {
+                                let mut buffer = [0u8; 4096];
+                                match reader.read(&mut buffer) {
+                                    Ok(0) => Some(Vec::new()), // EOF
+                                    Ok(n) => Some(buffer[..n].to_vec()),
+                                    Err(_) => None,
+                                }
+                            } else {
+                                None
                             }
                         } else {
                             None

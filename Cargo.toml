@@ -19,6 +19,10 @@ path = "src/bin/test-client.rs"
 name = "interactive-test-client"
 path = "src/bin/interactive-test-client.rs"
 
+[[bin]]
+name = "ssh-test-client"
+path = "src/bin/ssh-test-client.rs"
+
 [dependencies]
 egui = "0.32.0"
 eframe = { version = "0.32.0", default-features = false, features = [
