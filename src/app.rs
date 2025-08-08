@@ -66,12 +66,19 @@ impl App {
         // Apply font configuration
         ctx.set_fonts(fonts);
     }
+    
+    /// Handle daemon terminal output
+    fn handle_daemon_output(&mut self) {
+        // For now, we'll implement a simple approach
+        // TODO: Implement proper daemon output handling
+        // This would require setting up a receiver for daemon output
+    }
 }
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
-        log::debug!("🔄 Update called, tabs count: {}", self.state.tabs.len());
         
+    
         // Initialize with first tab if none exist
         if self.state.tabs.is_empty() {
             log::info!("🆘 No tabs exist, creating first tab in update()");
@@ -84,7 +91,7 @@ impl eframe::App for App {
         }
         
         // Check if any terminals have exited
-        let terminal_count = self.state.terminals.len();
+        let terminal_count = self.state.terminal_manager.get_terminal_count();
         let connecting_count = self.state.connecting_terminals.len();
         
         // Only force close if there are tabs but no terminals AND no connecting terminals
@@ -126,6 +133,9 @@ impl eframe::App for App {
         
         // Process daemon connection results
         self.state.process_daemon_connection_results();
+        
+        // Handle daemon output
+        self.handle_daemon_output();
         
         // Handle PTY events
         while let Ok((terminal_id, event)) = self.state.pty_proxy_receiver.try_recv() {

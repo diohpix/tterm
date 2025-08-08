@@ -295,49 +295,18 @@ impl InputHandler {
     
     /// Send data to terminal (handles both local PTY and daemon terminals)
     fn send_to_terminal(state: &mut AppState, terminal_id: u64, data: Vec<u8>) {
-        // Check if this is a daemon terminal
-        if state.daemon_terminals.contains(&terminal_id) {
-            // Send to daemon
-            Self::send_to_daemon(state, terminal_id, data);
-        } else if let Some(terminal) = state.terminals.get_mut(&terminal_id) {
-            // Send to local PTY
-            terminal.process_command(BackendCommand::Write(data));
-        }
-    }
-    
-    /// Send input data to daemon terminal
-    fn send_to_daemon(state: &mut AppState, terminal_id: u64, data: Vec<u8>) {
-        if let Some(daemon_client) = &state.daemon_client {
-            if let Some(session_id) = state.daemon_sessions.get(&terminal_id) {
-                log::info!("Sending {} bytes to daemon terminal {} (session {:?})", data.len(), terminal_id, session_id);
-                
-                // Clone necessary data for async operation
-                let daemon_client = daemon_client.clone();
-                let session_id = *session_id;
-                
-                // Spawn async task to send input to daemon
-                let ctx = state.egui_ctx.clone();
-                tokio::spawn(async move {
-                    if let Ok(mut client) = daemon_client.try_lock() {
-                        if let Err(e) = client.send_input(session_id, data).await {
-                            log::error!("Failed to send input to daemon: {}", e);
-                        }
-                    } else {
-                        log::warn!("Daemon client is busy, dropping input");
-                    }
-                    ctx.request_repaint();
-                });
-            } else {
-                log::warn!("No daemon session for terminal {}", terminal_id);
-            }
-        } else {
-            log::warn!("No daemon client available for terminal {}", terminal_id);
+        // Use unified terminal manager
+        if let Err(e) = state.terminal_manager.send_input(terminal_id, data) {
+            log::error!("Failed to send input to terminal {}: {}", terminal_id, e);
         }
     }
     
     /// Handle Korean input composition and return the final text to send to terminal
     fn handle_korean_input(state: &mut AppState, terminal_id: u64, input_text: &str) -> String {
         // Get or create Korean input state for this terminal
+        if !state.korean_input_states.contains_key(&terminal_id) {
+            state.korean_input_states.insert(terminal_id, KoreanInputState::new());
+        }
         let korean_state = state.korean_input_states.get_mut(&terminal_id)
             .expect("Korean input state should exist for terminal");
         

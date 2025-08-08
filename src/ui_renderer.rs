@@ -4,7 +4,7 @@ use crate::grid_manager::GridManager;
 use crate::broadcast_manager::BroadcastManager;
 use crate::ime::cjk;
 use egui::{Ui, Rect, Vec2, Pos2, FontId, Align2, Color32};
-use egui_term::TerminalView;
+use egui_term::{TerminalView, TerminalBackend};
 use uuid::Uuid;
 
 pub struct UiRenderer;
@@ -176,73 +176,59 @@ impl UiRenderer {
             return;
         }
         
-        // Check if this is a daemon terminal
-        let is_daemon_terminal = state.daemon_terminals.contains(&terminal_id);
+        // Get terminal backend (either local or daemon)
+        if let Some(terminal_backend) = state.terminal_manager.get_terminal_backend(terminal_id) {
+            Self::render_terminal(ui, terminal_id, terminal_backend, is_focused, is_selected_for_broadcast, available_rect);
+        } else {
+            ui.label("Terminal not found");
+        }
+    }
+    
+    /// Render terminal (unified for both local and daemon)
+    fn render_terminal(
+        ui: &mut Ui,
+        terminal_id: u64,
+        terminal_backend: &mut TerminalBackend,
+        is_focused: bool,
+        is_selected_for_broadcast: bool,
+        available_rect: Rect,
+    ) {
+        // Add visual focus indicator and broadcast selection
+        let border_color = if is_focused {
+            egui::Color32::from_rgb(0, 150, 255) // Blue for focused
+        } else if is_selected_for_broadcast {
+            egui::Color32::from_rgb(255, 100, 100) // Red for broadcast selected
+        } else {
+            egui::Color32::GRAY // Gray for normal
+        };
         
-        if let Some(terminal_backend) = state.terminals.get_mut(&terminal_id) {
-            // Add visual focus indicator, broadcast selection, and daemon indicator
-            let border_color = if is_daemon_terminal {
-                if is_focused {
-                    egui::Color32::from_rgb(0, 255, 100) // Green for focused daemon terminal
-                } else {
-                    egui::Color32::from_rgb(50, 200, 50) // Lighter green for daemon terminal
-                }
-            } else if is_focused {
-                egui::Color32::from_rgb(0, 150, 255) // Blue for focused
-            } else if is_selected_for_broadcast {
-                egui::Color32::from_rgb(255, 100, 100) // Red for broadcast selected
-            } else {
-                egui::Color32::GRAY // Gray for normal
-            };
-            
-            ui.painter().rect_stroke(
-                available_rect,
-                2.0,
-                egui::Stroke::new(2.0, border_color),
-                egui::epaint::StrokeKind::Outside,
-            );
-            
-            // Add "DAEMON" label for daemon terminals
-            if is_daemon_terminal {
-                let label_text = "🚀 DAEMON";
-                let text_pos = egui::pos2(available_rect.left() + 10.0, available_rect.top() + 5.0);
-                ui.painter().text(
-                    text_pos,
-                    egui::Align2::LEFT_TOP,
-                    label_text,
-                    egui::FontId::proportional(12.0),
-                    egui::Color32::from_rgb(0, 255, 100),
-                );
-            }
-            
-            // Check if this terminal is composing Korean text to potentially adjust cursor rendering
-            let _is_composing_korean = state.korean_input_states
-                .get(&terminal_id)
-                .map(|korean_state| korean_state.is_composing)
-                .unwrap_or(false);
-            
-            let terminal = TerminalView::new(ui, terminal_backend)
-                .set_focus(false) // Disable focus on TerminalView to prevent mouse dependency
-                .set_size(Vec2::new(available_rect.width(), available_rect.height()));
-            
-            // Render terminal and check for clicks
-            ui.scope_builder(egui::UiBuilder::new().max_rect(available_rect), |ui| {
-                ui.add(terminal)
-            });
-            
-            // Render CJK double-wide cursor overlay (includes Korean composition)
-            Self::render_cjk_cursor_overlay(state, ui, terminal_id, available_rect);
-            
-            // Check if the terminal area was clicked
-            if ui.input(|i| i.pointer.any_click()) {
-                if let Some(pos) = ui.input(|i| i.pointer.interact_pos()) {
-                    if available_rect.contains(pos) {
-                        state.focused_terminal = Some(terminal_id);
-                    }
+        ui.painter().rect_stroke(
+            available_rect,
+            2.0,
+            egui::Stroke::new(2.0, border_color),
+            egui::epaint::StrokeKind::Outside,
+        );
+        
+        let terminal = TerminalView::new(ui, terminal_backend)
+            .set_focus(false) // Disable focus on TerminalView to prevent mouse dependency
+            .set_size(Vec2::new(available_rect.width(), available_rect.height()));
+        
+        // Render terminal and check for clicks
+        ui.scope_builder(egui::UiBuilder::new().max_rect(available_rect), |ui| {
+            ui.add(terminal)
+        });
+        
+        // Check if the terminal area was clicked
+        if ui.input(|i| i.pointer.any_click()) {
+            if let Some(pos) = ui.input(|i| i.pointer.interact_pos()) {
+                if available_rect.contains(pos) {
+                    // TODO: Set focused terminal through a callback
                 }
             }
         }
     }
+    
+
     
     /// Render a split panel
     fn render_split_panel(

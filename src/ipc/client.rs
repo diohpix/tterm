@@ -4,9 +4,69 @@ use tokio::io::{AsyncWriteExt, AsyncReadExt};
 use tokio::sync::{mpsc, Mutex};
 use uuid::Uuid;
 use log::{info, error, debug, warn};
+use std::sync::OnceLock;
 
 use super::messages::{ClientMessage, DaemonMessage, ProtocolMessage, JsonMessage, TerminalData};
 use super::SOCKET_PATH;
+
+/// Global daemon client manager for thread-safe access
+static DAEMON_CLIENT_MANAGER: OnceLock<Arc<DaemonClientManager>> = OnceLock::new();
+
+/// Manager for daemon client operations
+pub struct DaemonClientManager {
+    input_sender: std::sync::mpsc::Sender<(Uuid, Vec<u8>)>, // session_id, data
+    output_sender: std::sync::mpsc::Sender<(Uuid, Vec<u8>)>, // session_id, output_data
+}
+
+impl DaemonClientManager {
+    /// Get or create the global daemon client manager
+    pub fn get() -> Arc<Self> {
+        DAEMON_CLIENT_MANAGER.get_or_init(|| {
+            let (input_sender, input_receiver) = std::sync::mpsc::channel();
+            let (output_sender, output_receiver) = std::sync::mpsc::channel();
+            
+            // Start background task to handle daemon operations
+            std::thread::spawn(move || {
+                let rt = match tokio::runtime::Runtime::new() {
+                    Ok(runtime) => runtime,
+                    Err(e) => {
+                        error!("Failed to create tokio runtime for daemon client manager: {}", e);
+                        return;
+                    }
+                };
+                
+                rt.block_on(async move {
+                    let mut daemon_client = match DaemonClient::new().await {
+                        Ok(client) => client,
+                        Err(e) => {
+                            error!("Failed to create daemon client: {}", e);
+                            return;
+                        }
+                    };
+                    
+                    for (session_id, data) in input_receiver {
+                        if let Err(e) = daemon_client.send_input(session_id, data).await {
+                            error!("Failed to send input to daemon: {}", e);
+                        }
+                    }
+                });
+            });
+            
+            Arc::new(Self { input_sender, output_sender })
+        }).clone()
+    }
+    
+    /// Send input to daemon session
+    pub fn send_input(&self, session_id: Uuid, data: Vec<u8>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        self.input_sender.send((session_id, data))
+            .map_err(|e| format!("Failed to send input: {}", e).into())
+    }
+    
+    /// Get output sender for daemon session
+    pub fn get_output_sender(&self) -> std::sync::mpsc::Sender<(Uuid, Vec<u8>)> {
+        self.output_sender.clone()
+    }
+}
 
 /// Client for communicating with the PTY daemon
 pub struct DaemonClient {
@@ -38,8 +98,9 @@ impl DaemonClient {
         
         // Start the response reading task
         let sender_for_reader = response_sender.clone();
+        let output_sender = crate::ipc::DaemonClientManager::get().get_output_sender();
         tokio::spawn(async move {
-            Self::read_responses(read_stream, sender_for_reader).await;
+            Self::read_responses(read_stream, sender_for_reader, output_sender).await;
         });
         
         // Register with daemon
@@ -201,6 +262,7 @@ impl DaemonClient {
     async fn read_responses(
         mut read_stream: tokio::net::unix::OwnedReadHalf,
         sender: mpsc::UnboundedSender<DaemonMessage>,
+        output_sender: std::sync::mpsc::Sender<(Uuid, Vec<u8>)>,
     ) {
         loop {
             let protocol_msg = ProtocolMessage::read_from_stream(&mut read_stream).await;
@@ -208,6 +270,13 @@ impl DaemonClient {
             match protocol_msg {
                 Ok(ProtocolMessage::Json(JsonMessage::Daemon(daemon_msg))) => {
                     debug!("Received JSON message from daemon: {:?}", daemon_msg);
+                    
+                    // Handle session output specifically
+                    if let DaemonMessage::SessionOutput { session_id, data } = &daemon_msg {
+                        debug!("Received session output for session {}: {} bytes", session_id, data.len());
+                        let _ = output_sender.send((*session_id, data.clone()));
+                    }
+                    
                     if sender.send(daemon_msg).is_err() {
                         debug!("Response receiver closed");
                         break;
@@ -220,6 +289,8 @@ impl DaemonClient {
                     // For bytes messages, we might need to handle terminal output differently
                     debug!("Received {} bytes from daemon", bytes.len());
                     // TODO: Handle terminal output bytes if needed
+                    // For now, we'll send it as output for session 0 (placeholder)
+                    let _ = output_sender.send((Uuid::nil(), bytes));
                 }
                 Err(e) => {
                     error!("Error reading from daemon: {}", e);

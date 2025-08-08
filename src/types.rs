@@ -1,11 +1,12 @@
-use egui_term::TerminalBackend;
 use std::collections::{HashMap, HashSet};
 use std::sync::mpsc::{Receiver, Sender};
-use crate::ime::korean::KoreanInputState;
-use crate::ipc::DaemonClient;
 use std::sync::Arc;
 use tokio::sync::Mutex as TokioMutex;
 use uuid::Uuid;
+use egui_term::{TerminalBackend, BackendCommand};
+use crate::ime::korean::KoreanInputState;
+use crate::ipc::{DaemonClient, DaemonClientManager};
+use std::any::Any;
 
 #[derive(Debug, Clone)]
 pub enum ViewMode {
@@ -43,14 +44,206 @@ pub struct TerminalTab {
     pub title: String,
 }
 
+/// Unified terminal interface for both local and daemon terminals
+pub trait AnyTerminal: Send + Sync + std::any::Any {
+    fn send_input(&mut self, data: Vec<u8>) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
+    fn get_terminal_id(&self) -> u64;
+    fn is_daemon(&self) -> bool;
+    fn get_backend(&mut self) -> Option<&mut TerminalBackend>;
+    fn get_daemon_terminal(&mut self) -> Option<&mut DaemonTerminal>;
+}
+
+/// Local PTY terminal implementation
+pub struct LocalTerminal {
+    terminal_id: u64,
+    backend: TerminalBackend,
+}
+
+impl LocalTerminal {
+    pub fn new(terminal_id: u64, backend: TerminalBackend) -> Self {
+        Self { terminal_id, backend }
+    }
+    
+    pub fn get_backend(&mut self) -> &mut TerminalBackend {
+        &mut self.backend
+    }
+}
+
+impl AnyTerminal for LocalTerminal {
+    fn send_input(&mut self, data: Vec<u8>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        self.backend.process_command(BackendCommand::Write(data));
+        Ok(())
+    }
+    
+    fn get_terminal_id(&self) -> u64 {
+        self.terminal_id
+    }
+    
+    fn is_daemon(&self) -> bool {
+        false
+    }
+    
+    fn get_backend(&mut self) -> Option<&mut TerminalBackend> {
+        Some(&mut self.backend)
+    }
+    
+    fn get_daemon_terminal(&mut self) -> Option<&mut DaemonTerminal> {
+        None // Local terminals don't have daemon terminal
+    }
+}
+
+/// Daemon terminal implementation
+pub struct DaemonTerminal {
+    terminal_id: u64,
+    session_id: Uuid,
+    client_manager: Arc<crate::ipc::DaemonClientManager>,
+    backend: TerminalBackend, // Use TerminalBackend for rendering
+}
+
+impl DaemonTerminal {
+    pub fn new(terminal_id: u64, session_id: Uuid) -> Self {
+        // Create a dummy TerminalBackend for daemon terminal
+        let backend = TerminalBackend::new(
+            terminal_id,
+            egui::Context::default(),
+            std::sync::mpsc::channel().0,
+            egui_term::BackendSettings {
+                shell: "/bin/bash".to_string(),
+                args: vec![],
+                working_directory: None,
+                env: std::collections::HashMap::new(),
+            },
+        ).unwrap_or_else(|_| {
+            // Fallback: create a minimal backend
+            TerminalBackend::new(
+                0,
+                egui::Context::default(),
+                std::sync::mpsc::channel().0,
+                egui_term::BackendSettings {
+                    shell: "/bin/echo".to_string(),
+                    args: vec!["Daemon Terminal".to_string()],
+                    working_directory: None,
+                    env: std::collections::HashMap::new(),
+                },
+            ).unwrap()
+        });
+        Self {
+            terminal_id,
+            session_id,
+            client_manager: crate::ipc::DaemonClientManager::get(),
+            backend,
+        }
+    }
+}
+
+impl AnyTerminal for DaemonTerminal {
+    fn send_input(&mut self, data: Vec<u8>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        self.client_manager.send_input(self.session_id, data)
+    }
+    
+    fn get_terminal_id(&self) -> u64 {
+        self.terminal_id
+    }
+    
+    fn is_daemon(&self) -> bool {
+        true
+    }
+    
+    fn get_backend(&mut self) -> Option<&mut TerminalBackend> {
+        Some(&mut self.backend)
+    }
+    
+    fn get_daemon_terminal(&mut self) -> Option<&mut DaemonTerminal> {
+        Some(self)
+    }
+}
+
+/// Terminal manager that handles both local and daemon terminals
+pub struct TerminalManager {
+    terminals: HashMap<u64, Box<dyn AnyTerminal>>,
+    next_terminal_id: u64,
+}
+
+impl TerminalManager {
+    pub fn new() -> Self {
+        Self {
+            terminals: HashMap::new(),
+            next_terminal_id: 1,
+        }
+    }
+    
+    pub fn add_local_terminal(&mut self, backend: TerminalBackend) -> u64 {
+        let terminal_id = self.next_terminal_id;
+        self.next_terminal_id += 1;
+        
+        let terminal = LocalTerminal::new(terminal_id, backend);
+        self.terminals.insert(terminal_id, Box::new(terminal));
+        terminal_id
+    }
+    
+    pub fn add_daemon_terminal(&mut self, session_id: Uuid) -> u64 {
+        let terminal_id = self.next_terminal_id;
+        self.next_terminal_id += 1;
+        
+        let terminal = DaemonTerminal::new(terminal_id, session_id);
+        self.terminals.insert(terminal_id, Box::new(terminal));
+        terminal_id
+    }
+    
+    pub fn send_input(&mut self, terminal_id: u64, data: Vec<u8>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        if let Some(terminal) = self.terminals.get_mut(&terminal_id) {
+            terminal.send_input(data)
+        } else {
+            Err(format!("Terminal {} not found", terminal_id).into())
+        }
+    }
+    
+    pub fn remove_terminal(&mut self, terminal_id: u64) {
+        self.terminals.remove(&terminal_id);
+    }
+    
+    pub fn get_terminal_count(&self) -> usize {
+        self.terminals.len()
+    }
+    
+    pub fn is_daemon_terminal(&self, terminal_id: u64) -> bool {
+        self.terminals.get(&terminal_id)
+            .map(|t| t.is_daemon())
+            .unwrap_or(false)
+    }
+    
+    pub fn get_local_backend(&mut self, terminal_id: u64) -> Option<&mut TerminalBackend> {
+        if let Some(terminal) = self.terminals.get_mut(&terminal_id) {
+            terminal.get_backend()
+        } else {
+            None
+        }
+    }
+    
+    pub fn get_daemon_terminal(&mut self, terminal_id: u64) -> Option<&mut DaemonTerminal> {
+        if let Some(terminal) = self.terminals.get_mut(&terminal_id) {
+            terminal.get_daemon_terminal()
+        } else {
+            None
+        }
+    }
+    
+    pub fn get_terminal_backend(&mut self, terminal_id: u64) -> Option<&mut TerminalBackend> {
+        if let Some(terminal) = self.terminals.get_mut(&terminal_id) {
+            terminal.get_backend()
+        } else {
+            None
+        }
+    }
+}
+
 /// Application state containing all terminal-related data
 pub struct AppState {
     pub tabs: HashMap<u64, TerminalTab>,
     pub tab_order: Vec<u64>, // Maintain tab order
     pub active_tab_id: u64,
     pub next_tab_id: u64,
-    pub terminals: HashMap<u64, TerminalBackend>, // All terminal backends
-    pub next_terminal_id: u64,
+    pub terminal_manager: TerminalManager, // Unified terminal management
     pub tab_layouts: HashMap<u64, PanelContent>, // Layout for each tab
     pub view_mode: ViewMode,
     pub focused_terminal: Option<u64>,
@@ -67,10 +260,15 @@ pub struct AppState {
     pub pty_proxy_sender: Sender<(u64, egui_term::PtyEvent)>,
     pub egui_ctx: egui::Context,
     
-    // PTY Daemon integration
+    // Legacy fields for backward compatibility (will be removed)
+    pub terminals: HashMap<u64, TerminalBackend>, // All terminal backends
+    pub next_terminal_id: u64,
     pub daemon_client: Option<Arc<TokioMutex<DaemonClient>>>,
     pub daemon_sessions: HashMap<u64, Uuid>, // terminal_id -> session_id mapping
     pub daemon_terminals: HashSet<u64>, // Track which terminals are daemon-backed
+    
+    // Daemon client manager for output handling
+    pub daemon_client_manager: Arc<crate::ipc::DaemonClientManager>,
     
     // Async terminal creation
     pub pending_tab_creation: Option<u64>, // tab_id that's waiting for terminal creation
@@ -92,8 +290,7 @@ impl AppState {
             tab_order: Vec::new(),
             active_tab_id: 0,
             next_tab_id: 1,
-            terminals: HashMap::new(),
-            next_terminal_id: 1,
+            terminal_manager: TerminalManager::new(),
             tab_layouts: HashMap::new(),
             view_mode: ViewMode::Single,
             focused_terminal: None,
@@ -103,6 +300,9 @@ impl AppState {
             pty_proxy_receiver,
             pty_proxy_sender,
             egui_ctx,
+            // Legacy fields for backward compatibility (will be removed)
+            terminals: HashMap::new(),
+            next_terminal_id: 1,
             daemon_client: None,
             daemon_sessions: HashMap::new(),
             daemon_terminals: HashSet::new(),
@@ -110,6 +310,7 @@ impl AppState {
             connecting_terminals: HashMap::new(),
             daemon_connection_receiver: Some(daemon_conn_receiver),
             daemon_connection_sender: Some(daemon_conn_sender),
+            daemon_client_manager: crate::ipc::DaemonClientManager::get(),
         }
     }
     
@@ -152,7 +353,7 @@ impl AppState {
             }
         };
 
-        self.terminals.insert(terminal_id, terminal_backend);
+        let terminal_id = self.terminal_manager.add_local_terminal(terminal_backend);
         self.korean_input_states.insert(terminal_id, KoreanInputState::new());
         terminal_id
     }
@@ -207,11 +408,7 @@ impl AppState {
         )
         .unwrap();
 
-        self.terminals.insert(terminal_id, terminal_backend);
-        self.korean_input_states.insert(terminal_id, KoreanInputState::new());
-        
-        log::info!("Created local PTY terminal {}", terminal_id);
-        terminal_id
+        self.terminal_manager.add_local_terminal(terminal_backend)
     }
     
     /// Spawn a background task to connect to daemon
@@ -302,17 +499,21 @@ impl AppState {
                 Ok((client, session_id)) => {
                     log::info!("✅ Daemon connection completed for terminal {}, session: {:?}", terminal_id, session_id);
                     
-                    // Store the daemon client and session
+                    // Store the daemon client and session (legacy)
                     self.daemon_client = Some(Arc::new(TokioMutex::new(client)));
                     self.daemon_sessions.insert(terminal_id, session_id);
+                    
+                    // Add to unified terminal manager
+                    let new_terminal_id = self.terminal_manager.add_daemon_terminal(session_id);
+                    self.korean_input_states.insert(new_terminal_id, KoreanInputState::new());
                     
                     // Remove from connecting terminals
                     self.connecting_terminals.remove(&terminal_id);
                     
                     // Create a daemon terminal instead of local PTY
-                    self.create_daemon_terminal_ui(terminal_id, session_id);
+                    self.create_daemon_terminal_ui(new_terminal_id, session_id);
                     
-                    log::info!("Created daemon-backed terminal {} with daemon UI", terminal_id);
+                    log::info!("Created daemon-backed terminal {} with daemon UI", new_terminal_id);
                 }
                 Err(e) => {
                     log::warn!("❌ Daemon connection failed for terminal {}: {}", terminal_id, e);
@@ -386,7 +587,7 @@ impl AppState {
                 )
                 .unwrap();
                 
-                self.terminals.insert(terminal_id, terminal_backend);
+                self.terminal_manager.add_local_terminal(terminal_backend);
                 self.korean_input_states.insert(terminal_id, KoreanInputState::new());
                 terminal_id
             }
@@ -407,7 +608,7 @@ impl AppState {
                 )
                 .unwrap();
                 
-                self.terminals.insert(terminal_id, terminal_backend);
+                self.terminal_manager.add_local_terminal(terminal_backend);
                 self.korean_input_states.insert(terminal_id, KoreanInputState::new());
                 terminal_id
             }
@@ -491,7 +692,7 @@ impl AppState {
             }
             
             // Remove terminal from current process
-            self.terminals.remove(&terminal_id);
+            self.terminal_manager.remove_terminal(terminal_id);
             self.daemon_sessions.remove(&terminal_id);
             self.korean_input_states.remove(&terminal_id);
             
