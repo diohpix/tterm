@@ -77,6 +77,48 @@ impl UiRenderer {
         }
     }
     
+    /// Render connecting status for a terminal
+    fn render_connecting_status(ui: &mut Ui, terminal_id: u64, status: &str, available_rect: Rect) {
+        // Draw a border around the connecting area
+        ui.painter().rect_stroke(
+            available_rect,
+            2.0,
+            egui::Stroke::new(2.0, egui::Color32::from_rgb(255, 165, 0)), // Orange border for connecting
+            egui::epaint::StrokeKind::Outside,
+        );
+        
+        // Center the connecting message
+        let center = available_rect.center();
+        ui.painter().text(
+            center,
+            Align2::CENTER_CENTER,
+            format!("🔗 {}\n\nTerminal {}", status, terminal_id),
+            FontId::proportional(16.0),
+            egui::Color32::from_rgb(255, 165, 0),
+        );
+        
+        // Add a subtle animated spinner effect
+        let time = ui.input(|i| i.time);
+        let spinner_angle = (time * 2.0) as f32;
+        let spinner_pos = center + Vec2::new(0.0, 40.0);
+        let spinner_radius = 8.0;
+        
+        for i in 0..8 {
+            let angle = spinner_angle + (i as f32 * std::f32::consts::PI / 4.0);
+            let alpha = ((i as f32 + spinner_angle) % 8.0) / 8.0;
+            let color = egui::Color32::from_rgba_premultiplied(
+                255, 165, 0, (alpha * 255.0) as u8
+            );
+            
+            let dot_pos = spinner_pos + Vec2::new(
+                angle.cos() * spinner_radius,
+                angle.sin() * spinner_radius,
+            );
+            
+            ui.painter().circle_filled(dot_pos, 2.0, color);
+        }
+    }
+    
     /// Render the status bar
     pub fn render_status_bar(state: &AppState, ui: &mut Ui) {
         ui.horizontal(|ui| {
@@ -127,9 +169,25 @@ impl UiRenderer {
         let is_focused = state.focused_terminal == Some(terminal_id);
         let is_selected_for_broadcast = BroadcastManager::is_terminal_selected(state, terminal_id);
         
+        // Check if this terminal is connecting
+        if let Some(connecting_status) = state.connecting_terminals.get(&terminal_id) {
+            // Show connecting status instead of terminal
+            Self::render_connecting_status(ui, terminal_id, connecting_status, available_rect);
+            return;
+        }
+        
+        // Check if this is a daemon terminal
+        let is_daemon_terminal = state.daemon_terminals.contains(&terminal_id);
+        
         if let Some(terminal_backend) = state.terminals.get_mut(&terminal_id) {
-            // Add visual focus indicator and broadcast selection
-            let border_color = if is_focused {
+            // Add visual focus indicator, broadcast selection, and daemon indicator
+            let border_color = if is_daemon_terminal {
+                if is_focused {
+                    egui::Color32::from_rgb(0, 255, 100) // Green for focused daemon terminal
+                } else {
+                    egui::Color32::from_rgb(50, 200, 50) // Lighter green for daemon terminal
+                }
+            } else if is_focused {
                 egui::Color32::from_rgb(0, 150, 255) // Blue for focused
             } else if is_selected_for_broadcast {
                 egui::Color32::from_rgb(255, 100, 100) // Red for broadcast selected
@@ -143,6 +201,19 @@ impl UiRenderer {
                 egui::Stroke::new(2.0, border_color),
                 egui::epaint::StrokeKind::Outside,
             );
+            
+            // Add "DAEMON" label for daemon terminals
+            if is_daemon_terminal {
+                let label_text = "🚀 DAEMON";
+                let text_pos = egui::pos2(available_rect.left() + 10.0, available_rect.top() + 5.0);
+                ui.painter().text(
+                    text_pos,
+                    egui::Align2::LEFT_TOP,
+                    label_text,
+                    egui::FontId::proportional(12.0),
+                    egui::Color32::from_rgb(0, 255, 100),
+                );
+            }
             
             // Check if this terminal is composing Korean text to potentially adjust cursor rendering
             let _is_composing_korean = state.korean_input_states

@@ -15,9 +15,13 @@ impl App {
     }
     
     pub fn new_with_session(cc: &eframe::CreationContext<'_>, attach_session_id: Option<uuid::Uuid>) -> Self {
+        log::info!("🚀 TTerminal app starting up...");
+        
         // Load and configure Korean fonts
+        log::info!("⚙️ Configuring Korean fonts...");
         Self::configure_korean_fonts(&cc.egui_ctx);
         
+        log::info!("🏗️ Creating AppState...");
         let mut state = AppState::new(cc);
         
         if let Some(session_id) = attach_session_id {
@@ -30,8 +34,11 @@ impl App {
             });
         } else {
             // Create the first tab for new instance
+            log::info!("📑 Creating first tab...");
             TabManager::create_new_tab(&mut state);
         }
+        
+        log::info!("✅ TTerminal app created successfully");
         
         Self { state }
     }
@@ -62,7 +69,50 @@ impl App {
 }
 
 impl eframe::App for App {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        log::debug!("🔄 Update called, tabs count: {}", self.state.tabs.len());
+        
+        // Initialize with first tab if none exist
+        if self.state.tabs.is_empty() {
+            log::info!("🆘 No tabs exist, creating first tab in update()");
+            TabManager::create_new_tab(&mut self.state);
+        }
+        
+        // Check if we should close
+        if ctx.input(|i| i.viewport().close_requested()) {
+            log::info!("🚪 Close requested by user");
+        }
+        
+        // Check if any terminals have exited
+        let terminal_count = self.state.terminals.len();
+        let connecting_count = self.state.connecting_terminals.len();
+        
+        // Only force close if there are tabs but no terminals AND no connecting terminals
+        if terminal_count == 0 && connecting_count == 0 && !self.state.tabs.is_empty() {
+            log::error!("💀 All terminals died but tabs still exist! Force closing.");
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            return;
+        }
+        
+        // Handle pending tab creation (disabled for now)
+        // if let Some(tab_id) = self.state.pending_tab_creation.take() {
+        //     // Try to create daemon terminal, fallback to local
+        //     let terminal_id = self.state.create_terminal();
+        //     
+        //     // Update tab title to remove loading state
+        //     if let Some(tab) = self.state.tabs.get_mut(&tab_id) {
+        //         tab.title = format!("Terminal {}", tab_id);
+        //     }
+        //     
+        //     // Set up the layout with the created terminal
+        //     let layout = crate::types::PanelContent::Terminal(terminal_id);
+        //     self.state.tab_layouts.insert(tab_id, layout);
+        //     self.state.focused_terminal = Some(terminal_id);
+        //     
+        //     // Update grid size after tab creation
+        //     crate::grid_manager::GridManager::update_grid_size(&mut self.state);
+        // }
+        
         // Consume Tab key events before egui can process them for UI focus
         // This ensures Tab keys go to terminals, not UI navigation
         if self.state.focused_terminal.is_some() {
@@ -74,10 +124,15 @@ impl eframe::App for App {
             });
         }
         
+        // Process daemon connection results
+        self.state.process_daemon_connection_results();
+        
         // Handle PTY events
         while let Ok((terminal_id, event)) = self.state.pty_proxy_receiver.try_recv() {
+            log::debug!("📥 PTY event received for terminal {}: {:?}", terminal_id, event);
             match event {
                 PtyEvent::Exit => {
+                    log::warn!("💀 Terminal {} exited!", terminal_id);
                     SplitManager::handle_terminal_exit(&mut self.state, terminal_id, ctx);
                 }
                 _ => {}

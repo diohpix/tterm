@@ -19,6 +19,19 @@ use uuid::Uuid;
 fn main() -> eframe::Result {
     env_logger::init();
     
+    // Set up panic handler to catch any issues
+    std::panic::set_hook(Box::new(|panic_info| {
+        eprintln!("PANIC: {}", panic_info);
+        if let Some(location) = panic_info.location() {
+            eprintln!("Location: {}:{}:{}", location.file(), location.line(), location.column());
+        }
+        if let Some(payload) = panic_info.payload().downcast_ref::<&str>() {
+            eprintln!("Payload: {}", payload);
+        }
+        // Exit explicitly to avoid hanging
+        std::process::exit(1);
+    }));
+    
     // Parse command line arguments
     let args: Vec<String> = env::args().collect();
     let mut attach_session_id: Option<Uuid> = None;

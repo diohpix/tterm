@@ -70,11 +70,21 @@ pub struct AppState {
     // PTY Daemon integration
     pub daemon_client: Option<Arc<TokioMutex<DaemonClient>>>,
     pub daemon_sessions: HashMap<u64, Uuid>, // terminal_id -> session_id mapping
+    pub daemon_terminals: HashSet<u64>, // Track which terminals are daemon-backed
+    
+    // Async terminal creation
+    pub pending_tab_creation: Option<u64>, // tab_id that's waiting for terminal creation
+    pub connecting_terminals: std::collections::HashMap<u64, String>, // terminal_id -> connection status
+    pub daemon_connection_receiver: Option<std::sync::mpsc::Receiver<(u64, Result<(crate::ipc::DaemonClient, uuid::Uuid), Box<dyn std::error::Error + Send + Sync>>)>>,
+    pub daemon_connection_sender: Option<std::sync::mpsc::Sender<(u64, Result<(crate::ipc::DaemonClient, uuid::Uuid), Box<dyn std::error::Error + Send + Sync>>)>>,
 }
 
 impl AppState {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let (pty_proxy_sender, pty_proxy_receiver) = std::sync::mpsc::channel();
+        
+        // Create daemon connection channel
+        let (daemon_conn_sender, daemon_conn_receiver) = std::sync::mpsc::channel();
         let egui_ctx = cc.egui_ctx.clone();
         
         Self {
@@ -95,30 +105,313 @@ impl AppState {
             egui_ctx,
             daemon_client: None,
             daemon_sessions: HashMap::new(),
+            daemon_terminals: HashSet::new(),
+            pending_tab_creation: None,
+            connecting_terminals: HashMap::new(),
+            daemon_connection_receiver: Some(daemon_conn_receiver),
+            daemon_connection_sender: Some(daemon_conn_sender),
         }
     }
     
     pub fn create_terminal(&mut self) -> u64 {
+        // Use daemon if available, fallback to local PTY
+        self.create_terminal_with_daemon_attempt()
+    }
+    
+    /// Create terminal without daemon check (for testing)
+    pub fn create_terminal_basic(&mut self) -> u64 {
         let system_shell = std::env::var("SHELL")
             .unwrap_or_else(|_| "/bin/bash".to_string());
+        let working_directory = std::env::current_dir()
+            .ok()
+            .map(|p| p);
             
         let terminal_id = self.next_terminal_id;
         self.next_terminal_id += 1;
         
+        log::info!("Creating local PTY terminal {}", terminal_id);
+        
+        let terminal_backend = match TerminalBackend::new(
+            terminal_id,
+            self.egui_ctx.clone(),
+            self.pty_proxy_sender.clone(),
+            egui_term::BackendSettings {
+                shell: system_shell.clone(),
+                args: vec!["-l".to_string()], // Login shell args
+                working_directory: working_directory.clone(),
+                env: std::collections::HashMap::new(),
+            },
+        ) {
+            Ok(backend) => {
+                log::info!("✅ Terminal backend created successfully for terminal {}", terminal_id);
+                backend
+            }
+            Err(e) => {
+                log::error!("❌ Failed to create terminal backend for terminal {}: {}", terminal_id, e);
+                panic!("Failed to create terminal backend: {}", e);
+            }
+        };
+
+        self.terminals.insert(terminal_id, terminal_backend);
+        self.korean_input_states.insert(terminal_id, KoreanInputState::new());
+        terminal_id
+    }
+    
+    /// Create terminal with daemon support - actual connection attempt
+    pub fn create_terminal_with_daemon_attempt(&mut self) -> u64 {
+        let system_shell = std::env::var("SHELL")
+            .unwrap_or_else(|_| "/bin/bash".to_string());
+        let working_directory = std::env::current_dir()
+            .ok();
+            
+        let terminal_id = self.next_terminal_id;
+        self.next_terminal_id += 1;
+        
+        // Check if daemon is available and try to connect
+        if self.daemon_client.is_some() {
+            log::info!("PTY daemon client already available for terminal {}", terminal_id);
+            // Try to create daemon terminal immediately
+            return self.create_daemon_terminal_sync(terminal_id, system_shell, working_directory);
+        } else if std::path::Path::new("/tmp/tterm-daemon.sock").exists() {
+            log::info!("✅ PTY daemon detected, attempting connection for terminal {}", terminal_id);
+            
+            // Mark this terminal as connecting
+            self.connecting_terminals.insert(terminal_id, "Connecting to daemon...".to_string());
+            
+            // Spawn background task to connect to daemon
+            self.spawn_daemon_connection_task(terminal_id, system_shell.clone(), working_directory.clone());
+            
+            // Return the terminal ID immediately (UI will show connecting state)
+            return terminal_id;
+        } else {
+            log::debug!("PTY daemon not available, using local PTY for terminal {}", terminal_id);
+        }
+        
+        // Fallback to local PTY terminal
+        self.create_local_pty_terminal(terminal_id, system_shell, working_directory)
+    }
+    
+    /// Create a local PTY terminal
+    fn create_local_pty_terminal(&mut self, terminal_id: u64, system_shell: String, working_directory: Option<std::path::PathBuf>) -> u64 {
+        let working_dir = working_directory.map(|p| p);
         let terminal_backend = TerminalBackend::new(
             terminal_id,
             self.egui_ctx.clone(),
             self.pty_proxy_sender.clone(),
             egui_term::BackendSettings {
                 shell: system_shell,
-                ..Default::default()
+                args: vec!["-l".to_string()], // Login shell
+                working_directory: working_dir,
+                env: std::collections::HashMap::new(),
             },
         )
         .unwrap();
 
         self.terminals.insert(terminal_id, terminal_backend);
         self.korean_input_states.insert(terminal_id, KoreanInputState::new());
+        
+        log::info!("Created local PTY terminal {}", terminal_id);
         terminal_id
+    }
+    
+    /// Spawn a background task to connect to daemon
+    fn spawn_daemon_connection_task(&mut self, terminal_id: u64, system_shell: String, working_directory: Option<std::path::PathBuf>) {
+        let ctx = self.egui_ctx.clone();
+        
+        // Use the existing sender channel
+        let tx = match self.daemon_connection_sender.clone() {
+            Some(sender) => sender,
+            None => {
+                log::error!("No daemon connection sender available");
+                return;
+            }
+        };
+        
+        std::thread::spawn(move || {
+            log::info!("Background: Thread started for terminal {}", terminal_id);
+            
+            // Create a new tokio runtime for this thread
+            let rt = match tokio::runtime::Runtime::new() {
+                Ok(runtime) => {
+                    log::info!("Background: Tokio runtime created for terminal {}", terminal_id);
+                    runtime
+                }
+                Err(e) => {
+                    log::error!("Background: Failed to create tokio runtime for terminal {}: {}", terminal_id, e);
+                    return;
+                }
+            };
+            
+            rt.block_on(async {
+                log::info!("Background: Entering async block for terminal {}", terminal_id);
+                log::info!("Background: Attempting to connect to daemon for terminal {}", terminal_id);
+                
+                match crate::ipc::DaemonClient::new().await {
+                    Ok(mut client) => {
+                        log::info!("Background: Successfully connected to daemon for terminal {}", terminal_id);
+                        
+                        // Create daemon session
+                        log::info!("Background: About to create session for terminal {}", terminal_id);
+                        log::info!("Background: Shell: {}, Working dir: {:?}", system_shell, working_directory.as_ref().map(|p| p.to_string_lossy()));
+                        
+                        let session_result = client.create_session(system_shell.clone(), working_directory.map(|p| p.to_string_lossy().to_string())).await;
+                        log::info!("Background: create_session returned for terminal {}", terminal_id);
+                        
+                        match session_result {
+                            Ok(session_id) => {
+                                log::info!("Background: Created daemon session {:?} for terminal {}", session_id, terminal_id);
+                                log::info!("Background: Sending result to main thread for terminal {}", terminal_id);
+                                let send_result = tx.send((terminal_id, Ok((client, session_id))));
+                                log::info!("Background: Send result: {:?} for terminal {}", send_result, terminal_id);
+                            }
+                            Err(e) => {
+                                log::warn!("Background: Failed to create daemon session: {}", e);
+                                let send_result = tx.send((terminal_id, Err(e)));
+                                log::warn!("Background: Send error result: {:?} for terminal {}", send_result, terminal_id);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        log::warn!("Background: Failed to connect to daemon: {}", e);
+                        let _ = tx.send((terminal_id, Err(e)));
+                    }
+                }
+                
+                // Trigger UI repaint
+                ctx.request_repaint();
+            });
+        });
+    }
+    
+    /// Process daemon connection results from background tasks
+    pub fn process_daemon_connection_results(&mut self) {
+        let mut results = Vec::new();
+        
+        // Collect all results first to avoid borrow checker issues
+        if let Some(ref receiver) = self.daemon_connection_receiver {
+            while let Ok(result) = receiver.try_recv() {
+                log::debug!("📥 Received daemon connection result");
+                results.push(result);
+            }
+        }
+        
+        // Process the collected results
+        for (terminal_id, result) in results {
+            log::info!("🔄 Processing connection result for terminal {}", terminal_id);
+            match result {
+                Ok((client, session_id)) => {
+                    log::info!("✅ Daemon connection completed for terminal {}, session: {:?}", terminal_id, session_id);
+                    
+                    // Store the daemon client and session
+                    self.daemon_client = Some(Arc::new(TokioMutex::new(client)));
+                    self.daemon_sessions.insert(terminal_id, session_id);
+                    
+                    // Remove from connecting terminals
+                    self.connecting_terminals.remove(&terminal_id);
+                    
+                    // Create a daemon terminal instead of local PTY
+                    self.create_daemon_terminal_ui(terminal_id, session_id);
+                    
+                    log::info!("Created daemon-backed terminal {} with daemon UI", terminal_id);
+                }
+                Err(e) => {
+                    log::warn!("❌ Daemon connection failed for terminal {}: {}", terminal_id, e);
+                    
+                    // Remove from connecting terminals and fallback to local PTY
+                    self.connecting_terminals.remove(&terminal_id);
+                    
+                    let working_dir = std::env::current_dir().ok();
+                    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
+                    self.create_local_pty_terminal(terminal_id, shell, working_dir);
+                    
+                    log::info!("Created fallback local PTY for terminal {}", terminal_id);
+                }
+            }
+        }
+    }
+    
+    /// Create a daemon-backed terminal UI
+    fn create_daemon_terminal_ui(&mut self, terminal_id: u64, session_id: Uuid) {
+        log::info!("Creating daemon terminal UI for terminal {} with session {:?}", terminal_id, session_id);
+        
+        // Mark this terminal as daemon-backed
+        self.daemon_terminals.insert(terminal_id);
+        
+        // For now, create a dummy terminal that will be handled differently in the UI
+        // The actual I/O will be handled through the daemon client
+        
+        // Create a local terminal but mark it as daemon-controlled
+        let working_dir = std::env::current_dir().ok();
+        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
+        self.create_local_pty_terminal(terminal_id, shell, working_dir);
+        
+        log::info!("Daemon terminal UI created for terminal {}", terminal_id);
+    }
+    
+    /// Create daemon terminal synchronously (when daemon client already exists)
+    fn create_daemon_terminal_sync(&mut self, terminal_id: u64, system_shell: String, working_directory: Option<std::path::PathBuf>) -> u64 {
+        // For now, fallback to local PTY since we can't do async in sync context
+        log::warn!("Daemon client exists but sync creation not implemented, falling back to local PTY");
+        self.create_local_pty_terminal(terminal_id, system_shell, working_directory)
+    }
+    
+    /// Create a terminal with daemon fallback to local PTY
+    pub async fn create_terminal_with_daemon_fallback(&mut self) -> u64 {
+        let system_shell = std::env::var("SHELL")
+            .unwrap_or_else(|_| "/bin/bash".to_string());
+        let working_directory = std::env::current_dir()
+            .ok()
+            .and_then(|p| p.to_str().map(|s| s.to_string()));
+            
+        let terminal_id = self.next_terminal_id;
+        self.next_terminal_id += 1;
+        
+        // Try to create daemon terminal first
+        match self.create_daemon_terminal(Some(system_shell.clone()), working_directory.clone()).await {
+            Ok(daemon_terminal_id) => {
+                log::info!("✅ Created daemon terminal {} for UI terminal {}", daemon_terminal_id, terminal_id);
+                
+                // For daemon terminals, we still need a minimal backend for UI
+                // but it will communicate through the daemon
+                let working_dir = working_directory.map(|s| std::path::PathBuf::from(s));
+                let terminal_backend = TerminalBackend::new(
+                    terminal_id,
+                    self.egui_ctx.clone(),
+                    self.pty_proxy_sender.clone(),
+                    egui_term::BackendSettings {
+                        args: vec![system_shell],
+                        working_directory: working_dir,
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+                
+                self.terminals.insert(terminal_id, terminal_backend);
+                self.korean_input_states.insert(terminal_id, KoreanInputState::new());
+                terminal_id
+            }
+            Err(e) => {
+                log::warn!("❌ Daemon terminal creation failed: {}, falling back to local PTY", e);
+                
+                // Fallback to local PTY
+                let working_dir = working_directory.map(|s| std::path::PathBuf::from(s));
+                let terminal_backend = TerminalBackend::new(
+                    terminal_id,
+                    self.egui_ctx.clone(),
+                    self.pty_proxy_sender.clone(),
+                    egui_term::BackendSettings {
+                        args: vec![system_shell],
+                        working_directory: working_dir,
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+                
+                self.terminals.insert(terminal_id, terminal_backend);
+                self.korean_input_states.insert(terminal_id, KoreanInputState::new());
+                terminal_id
+            }
+        }
     }
     
     /// Connect to PTY daemon if not already connected
@@ -160,6 +453,19 @@ impl AppState {
         } else {
             Err("Daemon client not available".into())
         }
+    }
+    
+    /// Create a UI-only terminal backend for daemon terminals
+    fn create_daemon_ui_terminal(&mut self, daemon_terminal_id: u64) -> u64 {
+        // For daemon terminals, we don't create a real PTY locally
+        // We just create the UI state and connect it to daemon communication
+        
+        // Create a dummy terminal backend that will be handled by daemon communication
+        // For now, we'll create a minimal backend without actual PTY
+        self.korean_input_states.insert(daemon_terminal_id, KoreanInputState::new());
+        
+        log::info!("Created UI terminal {} for daemon session", daemon_terminal_id);
+        daemon_terminal_id
     }
     
     /// Detach a terminal from current process and transfer to new window

@@ -3,7 +3,55 @@ use crate::types::{AppState, TerminalTab, PanelContent};
 pub struct TabManager;
 
 impl TabManager {
-    /// Create a new terminal tab
+    /// Create a new terminal tab with daemon fallback
+    pub fn create_new_tab_with_daemon(state: &mut AppState) {
+        // If already creating a tab, ignore
+        if state.pending_tab_creation.is_some() {
+            return;
+        }
+        
+        let tab_id = state.next_tab_id;
+        state.next_tab_id += 1;
+        
+        // Mark this tab as pending creation
+        state.pending_tab_creation = Some(tab_id);
+        
+        // Create temporary tab with loading state
+        let tab = TerminalTab {
+            id: tab_id,
+            title: format!("Terminal {} (connecting...)", tab_id),
+        };
+        
+        state.tabs.insert(tab_id, tab);
+        state.tab_order.push(tab_id);
+        state.active_tab_id = tab_id;
+        
+        // Terminal creation is now synchronous
+        // No need for async triggers
+    }
+    
+    /// Complete tab creation after async terminal is ready
+    pub async fn complete_pending_tab_creation(state: &mut AppState) {
+        if let Some(tab_id) = state.pending_tab_creation.take() {
+            // Create terminal with daemon fallback
+            let terminal_id = state.create_terminal_with_daemon_fallback().await;
+            
+            // Update tab title to remove loading state
+            if let Some(tab) = state.tabs.get_mut(&tab_id) {
+                tab.title = format!("Terminal {}", tab_id);
+            }
+            
+            // Set up the layout with the created terminal
+            let layout = PanelContent::Terminal(terminal_id);
+            state.tab_layouts.insert(tab_id, layout);
+            state.focused_terminal = Some(terminal_id);
+            
+            // Update grid size after tab creation
+            crate::grid_manager::GridManager::update_grid_size(state);
+        }
+    }
+    
+    /// Create a new terminal tab (original synchronous method for fallback)
     pub fn create_new_tab(state: &mut AppState) {
         let tab_id = state.next_tab_id;
         state.next_tab_id += 1;

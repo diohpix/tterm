@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 use std::io::{Write, Read};
 use uuid::Uuid;
 use log::{info, error, debug};
-use tokio::sync::mpsc;
+
 use portable_pty::{native_pty_system, PtySize, CommandBuilder, Child, MasterPty};
 
 /// Represents a single PTY session managed by the daemon
@@ -97,14 +97,12 @@ impl PtySession {
             // Clone writer and reader separately
             if let Ok(writer) = pty_master.take_writer() {
                 self.pty_writer = Some(Arc::new(Mutex::new(writer)));
-                debug!("PTY writer cloned and stored for session: {:?}", self.id);
             } else {
                 return Err("Failed to clone PTY writer".into());
             }
             
             if let Ok(reader) = pty_master.try_clone_reader() {
                 self.pty_reader = Some(Arc::new(Mutex::new(reader)));
-                debug!("PTY reader cloned and stored for session: {:?}", self.id);
             } else {
                 return Err("Failed to clone PTY reader".into());
             }
@@ -124,22 +122,14 @@ impl PtySession {
         tokio::spawn(async move {
             debug!("Starting PTY input task for session: {:?}", session_id);
             while let Some(data) = input_rx.recv().await {
-                let data_str = String::from_utf8_lossy(&data);
-                debug!("PTY input task RECEIVED data for session {:?}: {} bytes, content: {:?}", 
-                       session_id, data.len(), data_str);
-                       
                 let result = tokio::task::spawn_blocking({
                     let writer = writer_for_input.clone();
                     move || {
-                        debug!("PTY input task INSIDE spawn_blocking for session {:?}", session_id);
-                        
                         if let Ok(mut pty_writer) = writer.lock() {
-                            debug!("PTY writer.lock() SUCCESS for session {:?}", session_id);
                             let write_result = pty_writer.write_all(&data);
                             let flush_result = pty_writer.flush();
                             
                             if write_result.is_ok() && flush_result.is_ok() {
-                                debug!("PTY write SUCCESS for session {:?}", session_id);
                                 Some(())
                             } else {
                                 error!("PTY write FAILED for session {:?}: write={:?}, flush={:?}", 
@@ -170,20 +160,14 @@ impl PtySession {
                 let result = tokio::task::spawn_blocking({
                     let reader = reader_for_output.clone();
                     move || {
-                        debug!("PTY output task attempting to read for session {:?}", session_id);
-                        
                         if let Ok(mut pty_reader) = reader.lock() {
-                            debug!("PTY reader.lock() SUCCESS for session {:?}", session_id);
                             let mut buffer = [0u8; 4096];
                             match pty_reader.read(&mut buffer) {
                                 Ok(0) => {
-                                    debug!("PTY read EOF for session {:?}", session_id);
+                                    debug!("PTY EOF for session {:?}", session_id);
                                     Some(Vec::new()) // EOF
                                 }
-                                Ok(n) => {
-                                    debug!("PTY read SUCCESS for session {:?}: {} bytes", session_id, n);
-                                    Some(buffer[..n].to_vec())
-                                }
+                                Ok(n) => Some(buffer[..n].to_vec()),
                                 Err(e) => {
                                     error!("PTY read FAILED for session {:?}: {:?}", session_id, e);
                                     None
@@ -198,19 +182,9 @@ impl PtySession {
                 
                 match result {
                     Ok(Some(data)) if !data.is_empty() => {
-                        let data_str = String::from_utf8_lossy(&data);
-                        debug!("PTY output task READ data for session {:?}: {} bytes, content: {:?}", 
-                               session_id, data.len(), data_str);
-                        
-                        match output_tx.send(data) {
-                            Ok(()) => {
-                                debug!("PTY output_tx.send() SUCCESS for session {:?}", session_id);
-                            }
-                            Err(e) => {
-                                error!("PTY output_tx.send() FAILED for session {:?}: {:?}", session_id, e);
-                                debug!("Output channel closed for session: {:?}", session_id);
-                                break;
-                            }
+                        if output_tx.send(data).is_err() {
+                            debug!("Output channel closed for session: {:?}", session_id);
+                            break;
                         }
                     }
                     Ok(Some(_)) => {
@@ -250,8 +224,6 @@ impl PtySession {
     }
     
     pub fn send_input(&mut self, data: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
-        debug!("Sending input to session {:?}: {} bytes", self.id, data.len());
-        
         if let Some(sender) = &self.input_sender {
             sender.send(data.to_vec())?;
             self.last_activity = SystemTime::now();

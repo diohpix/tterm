@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::net::{UnixListener, UnixStream};
-use tokio::io::{AsyncWriteExt, AsyncReadExt};
+use tokio::io::AsyncWriteExt;
 use tokio::time::Duration;
 use tokio::sync::Mutex;
 use uuid::Uuid;
@@ -233,7 +233,6 @@ async fn handle_client_connection(daemon: SharedDaemon, stream: UnixStream) {
             
             if let Some(session_id) = session_id {
                 if last_session_id != Some(session_id) {
-                    debug!("Client {:?} now monitoring session {:?} for output", client_id, session_id);
                     last_session_id = Some(session_id);
                 }
                 
@@ -244,8 +243,6 @@ async fn handle_client_connection(daemon: SharedDaemon, stream: UnixStream) {
                 };
                 
                 if let Some(data) = output_data {
-                    debug!("Pushing PTY output to client {:?}: {} bytes", client_id, data.len());
-                    
                     // Send output to client using raw bytes protocol
                     let protocol_msg = ProtocolMessage::Bytes(data);
                     match protocol_msg.to_bytes() {
@@ -303,9 +300,6 @@ async fn handle_client_connection(daemon: SharedDaemon, stream: UnixStream) {
             Ok(ProtocolMessage::Bytes(raw_data)) => {
                 // Handle raw terminal data (optimized - no UUID in protocol)
                 let terminal_data = TerminalData::new(raw_data);
-                let data_str = String::from_utf8_lossy(&terminal_data.data);
-                debug!("Received terminal data from client {:?}: {} bytes, content: {:?}", 
-                       client_id, terminal_data.data.len(), data_str);
                 
                 // Find session for this client
                 let mut daemon_guard = daemon.lock().await;

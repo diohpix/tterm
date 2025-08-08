@@ -125,9 +125,7 @@ impl InputHandler {
                             let final_text = Self::handle_korean_input(state, focused_terminal_id, &text);
                             
                             // Then send to terminal
-                            if let Some(terminal) = state.terminals.get_mut(&focused_terminal_id) {
-                                terminal.process_command(BackendCommand::Write(final_text.as_bytes().to_vec()));
-                            }
+                            Self::send_to_terminal(state, focused_terminal_id, final_text.as_bytes().to_vec());
                         }
                     }
                     egui::Event::Key { key, pressed: true, modifiers, .. } => {
@@ -138,8 +136,8 @@ impl InputHandler {
                                 Self::finalize_korean_composition(state, focused_terminal_id);
                                 if broadcast_mode {
                                     BroadcastManager::broadcast_input(state, "\n");
-                                } else if let Some(terminal) = state.terminals.get_mut(&focused_terminal_id) {
-                                    terminal.process_command(BackendCommand::Write(b"\n".to_vec()));
+                                } else {
+                                    Self::send_to_terminal(state, focused_terminal_id, b"\n".to_vec());
                                 }
                             }
                             Key::Space => {
@@ -160,8 +158,8 @@ impl InputHandler {
                                 if let Some(bytes) = Self::key_to_bytes(&key, &modifiers) {
                                     if broadcast_mode {
                                         BroadcastManager::broadcast_input(state, &String::from_utf8_lossy(&bytes));
-                                    } else if let Some(terminal) = state.terminals.get_mut(&focused_terminal_id) {
-                                        terminal.process_command(BackendCommand::Write(bytes));
+                                    } else {
+                                        Self::send_to_terminal(state, focused_terminal_id, bytes);
                                     }
                                 }
                             }
@@ -171,8 +169,8 @@ impl InputHandler {
                                 if let Some(bytes) = Self::key_to_bytes(&key, &modifiers) {
                                     if broadcast_mode {
                                         BroadcastManager::broadcast_input(state, &String::from_utf8_lossy(&bytes));
-                                    } else if let Some(terminal) = state.terminals.get_mut(&focused_terminal_id) {
-                                        terminal.process_command(BackendCommand::Write(bytes));
+                                    } else {
+                                        Self::send_to_terminal(state, focused_terminal_id, bytes);
                                     }
                                 }
                             }
@@ -182,8 +180,8 @@ impl InputHandler {
                                 if let Some(bytes) = Self::key_to_bytes(&key, &modifiers) {
                                     if broadcast_mode {
                                         BroadcastManager::broadcast_input(state, &String::from_utf8_lossy(&bytes));
-                                    } else if let Some(terminal) = state.terminals.get_mut(&focused_terminal_id) {
-                                        terminal.process_command(BackendCommand::Write(bytes));
+                                    } else {
+                                        Self::send_to_terminal(state, focused_terminal_id, bytes);
                                     }
                                 }
                             }
@@ -192,8 +190,8 @@ impl InputHandler {
                                 if let Some(bytes) = Self::key_to_bytes(&key, &modifiers) {
                                     if broadcast_mode {
                                         BroadcastManager::broadcast_input(state, &String::from_utf8_lossy(&bytes));
-                                    } else if let Some(terminal) = state.terminals.get_mut(&focused_terminal_id) {
-                                        terminal.process_command(BackendCommand::Write(bytes));
+                                    } else {
+                                        Self::send_to_terminal(state, focused_terminal_id, bytes);
                                     }
                                 }
                             }
@@ -202,8 +200,8 @@ impl InputHandler {
                     egui::Event::Paste(text) => {
                         if broadcast_mode {
                             BroadcastManager::broadcast_input(state, &text);
-                        } else if let Some(terminal) = state.terminals.get_mut(&focused_terminal_id) {
-                            terminal.process_command(BackendCommand::Write(text.as_bytes().to_vec()));
+                        } else {
+                            Self::send_to_terminal(state, focused_terminal_id, text.as_bytes().to_vec());
                         }
                     }
                     _ => {}
@@ -288,10 +286,52 @@ impl InputHandler {
             
             if broadcast_mode {
                 BroadcastManager::broadcast_input(state, "\t");
-            } else if let Some(terminal) = state.terminals.get_mut(&focused_terminal_id) {
+            } else {
                 let tab_bytes = b"\t".to_vec();
-                terminal.process_command(BackendCommand::Write(tab_bytes));
+                Self::send_to_terminal(state, focused_terminal_id, tab_bytes);
             }
+        }
+    }
+    
+    /// Send data to terminal (handles both local PTY and daemon terminals)
+    fn send_to_terminal(state: &mut AppState, terminal_id: u64, data: Vec<u8>) {
+        // Check if this is a daemon terminal
+        if state.daemon_terminals.contains(&terminal_id) {
+            // Send to daemon
+            Self::send_to_daemon(state, terminal_id, data);
+        } else if let Some(terminal) = state.terminals.get_mut(&terminal_id) {
+            // Send to local PTY
+            terminal.process_command(BackendCommand::Write(data));
+        }
+    }
+    
+    /// Send input data to daemon terminal
+    fn send_to_daemon(state: &mut AppState, terminal_id: u64, data: Vec<u8>) {
+        if let Some(daemon_client) = &state.daemon_client {
+            if let Some(session_id) = state.daemon_sessions.get(&terminal_id) {
+                log::info!("Sending {} bytes to daemon terminal {} (session {:?})", data.len(), terminal_id, session_id);
+                
+                // Clone necessary data for async operation
+                let daemon_client = daemon_client.clone();
+                let session_id = *session_id;
+                
+                // Spawn async task to send input to daemon
+                let ctx = state.egui_ctx.clone();
+                tokio::spawn(async move {
+                    if let Ok(mut client) = daemon_client.try_lock() {
+                        if let Err(e) = client.send_input(session_id, data).await {
+                            log::error!("Failed to send input to daemon: {}", e);
+                        }
+                    } else {
+                        log::warn!("Daemon client is busy, dropping input");
+                    }
+                    ctx.request_repaint();
+                });
+            } else {
+                log::warn!("No daemon session for terminal {}", terminal_id);
+            }
+        } else {
+            log::warn!("No daemon client available for terminal {}", terminal_id);
         }
     }
     
@@ -329,16 +369,21 @@ impl InputHandler {
     
     /// Finalize any pending Korean composition and send to terminal
     fn finalize_korean_composition(state: &mut AppState, terminal_id: u64) {
-        if let Some(korean_state) = state.korean_input_states.get_mut(&terminal_id) {
+        let completed_char = if let Some(korean_state) = state.korean_input_states.get_mut(&terminal_id) {
             if korean_state.is_composing {
-                if let Some(terminal) = state.terminals.get_mut(&terminal_id) {
-                    // Send the finalized character to terminal
-                    if let Some(completed) = korean_state.get_current_char() {
-                        terminal.process_command(BackendCommand::Write(completed.to_string().as_bytes().to_vec()));
-                    }
-                }
+                let completed = korean_state.get_current_char();
                 korean_state.reset();
+                completed
+            } else {
+                None
             }
+        } else {
+            None
+        };
+        
+        // Send the finalized character to terminal if any
+        if let Some(completed) = completed_char {
+            Self::send_to_terminal(state, terminal_id, completed.to_string().as_bytes().to_vec());
         }
     }
     
