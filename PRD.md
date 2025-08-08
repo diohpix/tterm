@@ -484,4 +484,44 @@ TTerminal은 현대적인 개발 환경에서 요구되는 고급 터미널 기�
       - Unicode 표준 한글 조합 공식 사용: `U+AC00 + (초성×588 + 중성×28 + 종성)`
       - 시스템 IME와 독립적인 자체 한글 처리로 일관된 동작 보장
 - ✅ **Fixed**: 한글조합중 커서크기 문제 : 한글조합중엔 커서 크기가 더블 wide 크기로 늘어나야한다. 문자색이 반전되어야 커서와 중첩되도 보일 수 있다
-- ctrl+N 입력하면 새창으로 띄우기
+- ✅ **Fixed**: ctrl+N 입력하면 새창으로 띄우기
+  - 구현된 기능:
+    - `InputHandler::create_new_window()` 메서드로 새 프로세스 실행
+    - Ctrl+N 키보드 단축키로 새 터미널 창 생성
+    - 독립적인 터미널 인스턴스 실행
+
+### PTY 데몬 통신 프로토콜 (v2.0)
+
+- ✅ **Implemented**: 첫바이트 메시지 타입 구분 프로토콜
+  - 구현된 기능:
+    - **메시지 타입 0**: JSON 메시지 (세션 관리)
+      - 세션 생성: `RegisterAndCreateSession`
+      - 화면 resize: `ResizeSession { session_id, cols, rows }`
+      - 세션 종료: `TerminateSession`
+      - 클라이언트 연결/해제 관리
+    - **메시지 타입 1**: 바이트 배열 (터미널 입출력)
+      - 터미널 입력 데이터: `TerminalData { session_id, data }`
+      - 터미널 출력 데이터: 동일한 프로토콜 사용
+      - 실시간 바이너리 데이터 전송 최적화
+
+#### 프로토콜 스펙
+```
+메시지 형식: [첫바이트: 타입][페이로드]
+
+타입 0 (JSON): [0][JSON 문자열]
+타입 1 (바이트): [1][16바이트 UUID][터미널 데이터]
+```
+
+#### 구현된 클라이언트 API
+- `send_json_message()`: JSON 메시지 전송
+- `send_terminal_data()`: 바이트 데이터 전송
+- `resize_session()`: 터미널 크기 조정
+- `create_session()`: 새 PTY 세션 생성
+- `terminate_session()`: 세션 종료
+
+#### 구현된 서버 기능
+- 새 프로토콜 파싱 및 처리
+- JSON과 바이트 메시지 분리 처리
+- `PtySession::resize()`: 터미널 크기 조정
+- `SessionManager::resize_session()`: 세션 관리자 지원
+- 레거시 JSON 폴백 호환성 유지

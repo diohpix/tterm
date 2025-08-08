@@ -1,17 +1,17 @@
 use std::sync::Arc;
 use tokio::net::UnixStream;
-use tokio::io::{AsyncWriteExt, AsyncBufReadExt, BufReader};
+use tokio::io::{AsyncWriteExt, AsyncReadExt};
 use tokio::sync::{mpsc, Mutex};
 use uuid::Uuid;
 use log::{info, error, debug, warn};
 
-use super::messages::{ClientMessage, DaemonMessage};
+use super::messages::{ClientMessage, DaemonMessage, ProtocolMessage, JsonMessage, TerminalData};
 use super::SOCKET_PATH;
 
 /// Client for communicating with the PTY daemon
 pub struct DaemonClient {
     client_id: Uuid,
-    stream: Arc<Mutex<Option<BufReader<UnixStream>>>>,
+    stream: Arc<Mutex<Option<UnixStream>>>,
     response_sender: mpsc::UnboundedSender<DaemonMessage>,
     response_receiver: mpsc::UnboundedReceiver<DaemonMessage>,
 }
@@ -23,8 +23,7 @@ impl DaemonClient {
         let stream = UnixStream::connect(SOCKET_PATH).await?;
         info!("Connected to PTY daemon with client ID: {:?}", client_id);
         
-        let reader = BufReader::new(stream);
-        let stream_mutex = Arc::new(Mutex::new(Some(reader)));
+        let stream_mutex = Arc::new(Mutex::new(Some(stream)));
         
         let (response_sender, response_receiver) = mpsc::unbounded_channel();
         
@@ -54,7 +53,7 @@ impl DaemonClient {
             client_id: self.client_id,
         };
         
-        self.send_message(register_msg).await?;
+        self.send_json_message(register_msg).await?;
         
         // Wait for registration confirmation
         if let Some(DaemonMessage::ClientRegistered { .. }) = self.response_receiver.recv().await {
@@ -65,13 +64,28 @@ impl DaemonClient {
         }
     }
     
-    /// Send a message to the daemon
-    async fn send_message(&self, message: ClientMessage) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let json = serde_json::to_string(&message)?;
+    /// Send a JSON message to the daemon
+    async fn send_json_message(&self, message: ClientMessage) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let protocol_msg = ProtocolMessage::Json(JsonMessage::Client(message));
+        let data = protocol_msg.to_bytes()?;
         
         if let Some(mut stream_guard) = self.stream.lock().await.take() {
-            stream_guard.get_mut().write_all(json.as_bytes()).await?;
-            stream_guard.get_mut().write_all(b"\n").await?;
+            stream_guard.write_all(&data).await?;
+            self.stream.lock().await.replace(stream_guard);
+        } else {
+            return Err("Stream not available".into());
+        }
+        
+        Ok(())
+    }
+    
+    /// Send raw terminal data to the daemon (optimized - no session_id needed)
+    async fn send_terminal_data(&self, data: Vec<u8>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let terminal_data = TerminalData::new(data);
+        let protocol_bytes = terminal_data.to_protocol_bytes();
+        
+        if let Some(mut stream_guard) = self.stream.lock().await.take() {
+            stream_guard.write_all(&protocol_bytes).await?;
             self.stream.lock().await.replace(stream_guard);
         } else {
             return Err("Stream not available".into());
@@ -83,13 +97,13 @@ impl DaemonClient {
     /// Create a new PTY session through the daemon
     pub async fn create_session(&mut self, shell: String, working_directory: Option<String>) -> Result<Uuid, Box<dyn std::error::Error + Send + Sync>> {
         let session_id = Uuid::new_v4();
-        let create_msg = ClientMessage::CreateSession {
+        let create_msg = ClientMessage::RegisterAndCreateSession {
             session_id,
             shell,
             working_directory,
         };
         
-        self.send_message(create_msg).await?;
+        self.send_json_message(create_msg).await?;
         
         // Wait for session creation confirmation
         if let Some(DaemonMessage::SessionCreated { session_id: created_id }) = self.response_receiver.recv().await {
@@ -111,7 +125,7 @@ impl DaemonClient {
             client_id: self.client_id,
         };
         
-        self.send_message(attach_msg).await?;
+        self.send_json_message(attach_msg).await?;
         Ok(())
     }
     
@@ -122,26 +136,21 @@ impl DaemonClient {
             client_id: self.client_id,
         };
         
-        self.send_message(detach_msg).await?;
+        self.send_json_message(detach_msg).await?;
         Ok(())
     }
     
     /// Send input to a session
-    pub async fn send_input(&mut self, session_id: Uuid, data: Vec<u8>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let input_msg = ClientMessage::SendInput {
-            session_id,
-            data,
-        };
-        
-        self.send_message(input_msg).await?;
-        Ok(())
+    pub async fn send_input(&mut self, _session_id: Uuid, data: Vec<u8>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        // Use new raw bytes protocol for terminal input (session_id not needed in protocol)
+        self.send_terminal_data(data).await
     }
     
     /// Read output from a session
     pub async fn read_output(&mut self, session_id: Uuid) -> Result<Option<Vec<u8>>, Box<dyn std::error::Error + Send + Sync>> {
         let output_msg = ClientMessage::ReadOutput { session_id };
         
-        self.send_message(output_msg).await?;
+        self.send_json_message(output_msg).await?;
         
         // Wait for output response
         if let Some(DaemonMessage::SessionOutput { data, .. }) = self.response_receiver.recv().await {
@@ -155,7 +164,7 @@ impl DaemonClient {
     pub async fn list_sessions(&mut self) -> Result<Vec<super::SessionInfo>, Box<dyn std::error::Error + Send + Sync>> {
         let list_msg = ClientMessage::ListSessions;
         
-        self.send_message(list_msg).await?;
+        self.send_json_message(list_msg).await?;
         
         // Wait for session list response
         if let Some(DaemonMessage::SessionList { sessions }) = self.response_receiver.recv().await {
@@ -165,27 +174,31 @@ impl DaemonClient {
         }
     }
     
+    /// Resize a session
+    pub async fn resize_session(&mut self, session_id: Uuid, cols: u16, rows: u16) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let resize_msg = ClientMessage::ResizeSession { session_id, cols, rows };
+        
+        self.send_json_message(resize_msg).await?;
+        Ok(())
+    }
+    
     /// Terminate a session
     pub async fn terminate_session(&mut self, session_id: Uuid) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let terminate_msg = ClientMessage::TerminateSession { session_id };
         
-        self.send_message(terminate_msg).await?;
+        self.send_json_message(terminate_msg).await?;
         Ok(())
     }
     
     /// Background task to read responses from the daemon
     async fn read_responses(
-        stream: Arc<Mutex<Option<BufReader<UnixStream>>>>,
+        stream: Arc<Mutex<Option<UnixStream>>>,
         sender: mpsc::UnboundedSender<DaemonMessage>,
     ) {
-        let mut line = String::new();
-        
         loop {
-            line.clear();
-            
-            let read_result = {
+            let protocol_msg = {
                 if let Some(mut stream_guard) = stream.lock().await.take() {
-                    let result = stream_guard.read_line(&mut line).await;
+                    let result = ProtocolMessage::read_from_stream(&mut stream_guard).await;
                     stream.lock().await.replace(stream_guard);
                     result
                 } else {
@@ -193,29 +206,21 @@ impl DaemonClient {
                 }
             };
             
-            match read_result {
-                Ok(0) => {
-                    debug!("Daemon connection closed");
-                    break;
+            match protocol_msg {
+                Ok(ProtocolMessage::Json(JsonMessage::Daemon(daemon_msg))) => {
+                    debug!("Received JSON message from daemon: {:?}", daemon_msg);
+                    if sender.send(daemon_msg).is_err() {
+                        debug!("Response receiver closed");
+                        break;
+                    }
                 }
-                Ok(_) => {
-                    let trimmed = line.trim();
-                    if trimmed.is_empty() {
-                        continue;
-                    }
-                    
-                    match serde_json::from_str::<DaemonMessage>(trimmed) {
-                        Ok(message) => {
-                            debug!("Received message from daemon: {:?}", message);
-                            if sender.send(message).is_err() {
-                                debug!("Response receiver closed");
-                                break;
-                            }
-                        }
-                        Err(e) => {
-                            warn!("Failed to parse daemon message: {}, raw: {}", e, trimmed);
-                        }
-                    }
+                Ok(ProtocolMessage::Json(JsonMessage::Client(_))) => {
+                    warn!("Received unexpected client message from daemon");
+                }
+                Ok(ProtocolMessage::Bytes(bytes)) => {
+                    // For bytes messages, we might need to handle terminal output differently
+                    debug!("Received {} bytes from daemon", bytes.len());
+                    // TODO: Handle terminal output bytes if needed
                 }
                 Err(e) => {
                     error!("Error reading from daemon: {}", e);
@@ -238,7 +243,7 @@ impl DaemonClient {
             client_id: self.client_id,
         };
         
-        self.send_message(disconnect_msg).await?;
+        self.send_json_message(disconnect_msg).await?;
         
         // Close the stream
         self.stream.lock().await.take();

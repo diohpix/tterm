@@ -52,7 +52,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     // Test: Create session
     info!("Creating session...");
-    let create_msg = ClientMessage::CreateSession {
+    let create_msg = ClientMessage::RegisterAndCreateSession {
         session_id,
         shell: "/bin/bash".to_string(),
         working_directory: Some("/tmp".to_string()),

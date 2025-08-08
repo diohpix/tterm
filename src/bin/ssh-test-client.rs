@@ -52,7 +52,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create SSH session (simulated with bash for now)
     info!("🔑 Creating SSH-like session...");
     let session_id = Uuid::new_v4();
-    let create_msg = ClientMessage::CreateSession {
+    let create_msg = ClientMessage::RegisterAndCreateSession {
         session_id,
         shell: "/bin/bash".to_string(),
         working_directory: Some("/tmp".to_string()),

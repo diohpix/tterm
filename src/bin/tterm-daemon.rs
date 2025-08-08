@@ -1,14 +1,14 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::net::{UnixListener, UnixStream};
-use tokio::io::{AsyncReadExt, AsyncWriteExt, AsyncBufReadExt, BufReader};
-use tokio::time::{timeout, Duration};
+use tokio::io::{AsyncWriteExt, AsyncReadExt};
+use tokio::time::Duration;
 use tokio::sync::Mutex;
 use uuid::Uuid;
 use log::{info, error, debug, warn};
 
 // Import from main crate
-use full_screen::ipc::{ClientMessage, DaemonMessage, SOCKET_PATH};
+use full_screen::ipc::{ClientMessage, DaemonMessage, ProtocolMessage, JsonMessage, TerminalData, SOCKET_PATH};
 use full_screen::session::SessionManager;
 
 type SharedDaemon = Arc<Mutex<PtyDaemon>>;
@@ -16,6 +16,8 @@ type SharedDaemon = Arc<Mutex<PtyDaemon>>;
 struct PtyDaemon {
     session_manager: SessionManager,
     clients: HashMap<Uuid, ClientConnection>,
+    // Map client_id to current session_id for efficient bytes routing
+    client_sessions: HashMap<Uuid, Uuid>,
 }
 
 struct ClientConnection {
@@ -28,6 +30,7 @@ impl PtyDaemon {
         Self {
             session_manager: SessionManager::new(),
             clients: HashMap::new(),
+            client_sessions: HashMap::new(),
         }
     }
 
@@ -37,13 +40,16 @@ impl PtyDaemon {
                 debug!("Registering client: {:?}", client_id);
                 Some(DaemonMessage::ClientRegistered { client_id })
             }
-            ClientMessage::CreateSession { session_id, shell, working_directory } => {
+            ClientMessage::RegisterAndCreateSession { session_id, shell, working_directory } => {
                 debug!("Creating session: {:?}", session_id);
                 match self.session_manager.create_session(session_id, shell, working_directory).await {
                     Ok(()) => {
                         // Automatically attach the creating client to the session
                         if let Err(e) = self.session_manager.attach_client_to_session(session_id, client_id) {
                             error!("Failed to attach client to new session: {}", e);
+                        } else {
+                            // Map client to session for efficient bytes routing
+                            self.client_sessions.insert(client_id, session_id);
                         }
                         Some(DaemonMessage::SessionCreated { session_id })
                     }
@@ -58,7 +64,11 @@ impl PtyDaemon {
             ClientMessage::AttachToSession { session_id, client_id } => {
                 debug!("Attaching client {:?} to session {:?}", client_id, session_id);
                 match self.session_manager.attach_client_to_session(session_id, client_id) {
-                    Ok(()) => None, // Silent success
+                    Ok(()) => {
+                        // Map client to session for efficient bytes routing
+                        self.client_sessions.insert(client_id, session_id);
+                        None // Silent success
+                    }
                     Err(e) => {
                         error!("Failed to attach to session: {}", e);
                         Some(DaemonMessage::Error { 
@@ -70,7 +80,11 @@ impl PtyDaemon {
             ClientMessage::DetachFromSession { session_id, client_id } => {
                 debug!("Detaching client {:?} from session {:?}", client_id, session_id);
                 match self.session_manager.detach_client_from_session(session_id, client_id) {
-                    Ok(()) => None, // Silent success
+                    Ok(()) => {
+                        // Remove client-session mapping
+                        self.client_sessions.remove(&client_id);
+                        None // Silent success
+                    }
                     Err(e) => {
                         error!("Failed to detach from session: {}", e);
                         Some(DaemonMessage::Error { 
@@ -80,12 +94,25 @@ impl PtyDaemon {
                 }
             }
             ClientMessage::SendInput { session_id, data } => {
+                // Note: SendInput is deprecated in favor of raw bytes protocol
                 match self.session_manager.send_input_to_session(session_id, &data) {
                     Ok(()) => None, // Silent success
                     Err(e) => {
                         error!("Failed to send input to session: {}", e);
                         Some(DaemonMessage::Error { 
                             message: format!("Failed to send input: {}", e) 
+                        })
+                    }
+                }
+            }
+            ClientMessage::ResizeSession { session_id, cols, rows } => {
+                debug!("Resizing session {:?} to {}x{}", session_id, cols, rows);
+                match self.session_manager.resize_session(session_id, cols, rows) {
+                    Ok(()) => None, // Silent success
+                    Err(e) => {
+                        error!("Failed to resize session: {}", e);
+                        Some(DaemonMessage::Error { 
+                            message: format!("Failed to resize session: {}", e) 
                         })
                     }
                 }
@@ -122,6 +149,9 @@ impl PtyDaemon {
             ClientMessage::Disconnect { client_id: disconnect_id } => {
                 debug!("Client disconnecting: {:?}", disconnect_id);
                 self.clients.remove(&disconnect_id);
+                
+                // Remove client-session mapping
+                self.client_sessions.remove(&disconnect_id);
                 
                 // Detach the client from all sessions
                 for session_info in self.session_manager.list_sessions() {
@@ -185,66 +215,113 @@ async fn handle_client_connection(daemon: SharedDaemon, stream: UnixStream) {
     let client_id = Uuid::new_v4();
     info!("Handling client connection: {:?}", client_id);
     
-    let mut reader = BufReader::new(stream);
-    let mut line = String::new();
+    let (mut read_stream, write_stream) = stream.into_split();
+    let write_stream = Arc::new(Mutex::new(write_stream));
     
-    loop {
-        line.clear();
+    // Spawn task to handle PTY output pushing
+    let daemon_for_output = daemon.clone();
+    let write_stream_for_output = write_stream.clone();
+    let output_push_task = tokio::spawn(async move {
+        let mut last_session_id: Option<Uuid> = None;
         
-        match reader.read_line(&mut line).await {
-            Ok(0) => {
-                debug!("Client {:?} disconnected", client_id);
-                break;
-            }
-            Ok(_) => {
-                // Parse the message
-                let trimmed = line.trim();
-                if trimmed.is_empty() {
-                    continue;
+        loop {
+            // Check if client has an active session
+            let session_id = {
+                let daemon_guard = daemon_for_output.lock().await;
+                daemon_guard.client_sessions.get(&client_id).cloned()
+            };
+            
+            if let Some(session_id) = session_id {
+                if last_session_id != Some(session_id) {
+                    debug!("Client {:?} now monitoring session {:?} for output", client_id, session_id);
+                    last_session_id = Some(session_id);
                 }
                 
-                match serde_json::from_str::<ClientMessage>(trimmed) {
-                    Ok(message) => {
-                        debug!("Received message from client {:?}: {:?}", client_id, message);
-                        
-                        let response = {
-                            let mut daemon_guard = daemon.lock().await;
-                            daemon_guard.handle_client_message(client_id, message).await
-                        };
-                        
-                        if let Some(response) = response {
-                            // Send response back to client
-                            let response_json = match serde_json::to_string(&response) {
-                                Ok(json) => json,
-                                Err(e) => {
-                                    error!("Failed to serialize response: {}", e);
-                                    continue;
-                                }
-                            };
-                            
-                            let mut stream = reader.get_mut();
-                            if let Err(e) = stream.write_all(response_json.as_bytes()).await {
-                                error!("Failed to send response to client: {}", e);
-                                break;
-                            }
-                            if let Err(e) = stream.write_all(b"\n").await {
-                                error!("Failed to send newline to client: {}", e);
+                // Try to read output from session
+                let output_data = {
+                    let mut daemon_guard = daemon_for_output.lock().await;
+                    daemon_guard.session_manager.read_output_from_session(session_id).ok().flatten()
+                };
+                
+                if let Some(data) = output_data {
+                    debug!("Pushing PTY output to client {:?}: {} bytes", client_id, data.len());
+                    
+                    // Send output to client using raw bytes protocol
+                    let protocol_msg = ProtocolMessage::Bytes(data);
+                    match protocol_msg.to_bytes() {
+                        Ok(response_bytes) => {
+                            let mut stream = write_stream_for_output.lock().await;
+                            if let Err(e) = stream.write_all(&response_bytes).await {
+                                error!("Failed to push output to client {:?}: {}", client_id, e);
                                 break;
                             }
                         }
+                        Err(e) => {
+                            error!("Failed to serialize output for client {:?}: {}", client_id, e);
+                        }
                     }
-                    Err(e) => {
-                        error!("Failed to parse message from client {:?}: {}", client_id, e);
-                        // Send error response
-                        let error_response = DaemonMessage::Error {
-                            message: format!("Invalid message format: {}", e),
-                        };
-                        let response_json = serde_json::to_string(&error_response).unwrap_or_default();
-                        let mut stream = reader.get_mut();
-                        let _ = stream.write_all(response_json.as_bytes()).await;
-                        let _ = stream.write_all(b"\n").await;
+                } else {
+                    // No output available, sleep briefly
+                    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+                }
+            } else {
+                // No active session, sleep longer
+                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+            }
+        }
+    });
+    
+    // Handle client messages
+    loop {
+        match ProtocolMessage::read_from_stream(&mut read_stream).await {
+            Ok(ProtocolMessage::Json(JsonMessage::Client(client_msg))) => {
+                debug!("Received JSON message from client {:?}: {:?}", client_id, client_msg);
+                
+                let response = {
+                    let mut daemon_guard = daemon.lock().await;
+                    daemon_guard.handle_client_message(client_id, client_msg).await
+                };
+                
+                if let Some(response) = response {
+                    // Send response back to client using new protocol
+                    let protocol_response = ProtocolMessage::Json(JsonMessage::Daemon(response));
+                    match protocol_response.to_bytes() {
+                        Ok(response_bytes) => {
+                            let mut stream = write_stream.lock().await;
+                            if let Err(e) = stream.write_all(&response_bytes).await {
+                                error!("Failed to send response to client: {}", e);
+                                break;
+                            }
+                        }
+                        Err(e) => {
+                            error!("Failed to serialize response: {}", e);
+                            continue;
+                        }
                     }
                 }
+            }
+            Ok(ProtocolMessage::Bytes(raw_data)) => {
+                // Handle raw terminal data (optimized - no UUID in protocol)
+                let terminal_data = TerminalData::new(raw_data);
+                let data_str = String::from_utf8_lossy(&terminal_data.data);
+                debug!("Received terminal data from client {:?}: {} bytes, content: {:?}", 
+                       client_id, terminal_data.data.len(), data_str);
+                
+                // Find session for this client
+                let mut daemon_guard = daemon.lock().await;
+                if let Some(&session_id) = daemon_guard.client_sessions.get(&client_id) {
+                    if let Err(e) = daemon_guard.session_manager.send_input_to_session(
+                        session_id, 
+                        &terminal_data.data
+                    ) {
+                        error!("Failed to send terminal input to session {:?}: {}", session_id, e);
+                    }
+                } else {
+                    warn!("No session found for client {:?}, ignoring terminal data", client_id);
+                }
+            }
+            Ok(ProtocolMessage::Json(JsonMessage::Daemon(_))) => {
+                warn!("Received unexpected daemon message from client {:?}", client_id);
             }
             Err(e) => {
                 error!("Error reading from client {:?}: {}", client_id, e);
@@ -254,6 +331,7 @@ async fn handle_client_connection(daemon: SharedDaemon, stream: UnixStream) {
     }
     
     // Clean up when client disconnects
+    output_push_task.abort(); // Stop the output push task
     let disconnect_msg = ClientMessage::Disconnect { client_id };
     let mut daemon_guard = daemon.lock().await;
     daemon_guard.handle_client_message(client_id, disconnect_msg).await;

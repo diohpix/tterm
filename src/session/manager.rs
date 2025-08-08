@@ -91,6 +91,14 @@ impl SessionManager {
         }
     }
     
+    pub fn resize_session(&mut self, session_id: Uuid, cols: u16, rows: u16) -> Result<(), Box<dyn std::error::Error>> {
+        if let Some(session) = self.sessions.get_mut(&session_id) {
+            session.resize(cols, rows)
+        } else {
+            Err(format!("Session {:?} not found", session_id).into())
+        }
+    }
+    
     pub fn list_sessions(&self) -> Vec<SessionInfo> {
         self.sessions.values().map(|session| {
             SessionInfo {
